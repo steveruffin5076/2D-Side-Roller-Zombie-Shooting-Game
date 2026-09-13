@@ -2758,11 +2758,13 @@ export class Engine {
       const p = this.pl;
       const w = this.effWeapon(this.kind);
       const range = w.range * (1 + 0.12 * (this.stacks["velo"] || 0));
-      // the beam is a world-space distance, so it magnifies with everything else
+      // the beam is a world-space distance, so it magnifies with everything else.
+      // Origin at chest height, same as the gun sprite and the real bullet
+      // spawn point in fire() — p.y alone is the player's feet.
       c.save();
       this.applyZoom();
       const ox = p.x - cam + Math.cos(p.aim) * 20;
-      const oy = p.y + camY + Math.sin(p.aim) * 20;
+      const oy = p.y - CHEST_H + camY + Math.sin(p.aim) * 20;
       const ex = ox + Math.cos(p.aim) * range;
       const ey = oy + Math.sin(p.aim) * range;
       const hot = this.onTarget;
