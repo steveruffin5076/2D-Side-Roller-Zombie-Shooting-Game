@@ -249,7 +249,7 @@ export class Engine {
 
   /* --- targeting / fire mode --- */
   /** true = Automated Engagement, false = Manual Trigger */
-  private autoFire = false;
+  private autoFire = true;
   /** lane the player is locked to */
   private facing: 1 | -1 = 1;
   /** whatever the laser ray is currently crossing — a Zombie or the Boss, see acquireRayTarget() */
@@ -542,7 +542,7 @@ export class Engine {
     this.reloading = false;
     this.reloadT = 0;
     this.reloadDur = 0;
-    this.autoFire = false;
+    this.autoFire = true;
     this.facing = 1;
     this.target = null;
     this.onTarget = false;
@@ -639,6 +639,10 @@ export class Engine {
    * (the lamp post's thin pole) is excluded via a 0 radius in DECOR_SOLID_R. */
   private resolvePlayerObstacles() {
     const p = this.pl;
+    // airborne clears every ground obstacle outright — jumping is a full
+    // dodge here already (see the zombie/boss contact-damage checks), and a
+    // hop that still got shoved back by a tombstone would feel broken
+    if (!p.grounded) return;
     const playerR = 13;
     for (const d of this.decor) {
       const solidR = DECOR_SOLID_R[d.kind];

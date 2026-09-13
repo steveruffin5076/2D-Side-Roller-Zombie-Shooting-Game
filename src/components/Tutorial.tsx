@@ -95,12 +95,12 @@ function ControlsTab() {
     <div>
       <Section title="MOVEMENT & AIM">
         <Row icon={<span className="kbd">A D</span>}>Run left or right — a side view, so that's the whole world of movement. Whichever way you're facing is the lane your gun covers.</Row>
-        <Row icon={<span className="kbd">MOUSE</span>}>Fire, in manual mode. Aim itself is automatic — you don't point a cursor, you just face a direction and the gun covers that lane.</Row>
+        <Row icon={<span className="kbd">MOUSE</span>}>Fire, if you switch to manual mode. Aim itself is always automatic — you don't point a cursor, you just face a direction and the gun covers that lane.</Row>
         <Row icon={<span className="kbd">SHIFT</span>}>Dash — a short burst of speed with brief invulnerability. Watch the DASH READY indicator bottom-right; it's on a cooldown.</Row>
       </Section>
       <Section title="COMBAT">
-        <Row icon={<span className="kbd">CLICK</span>}>Fire, in manual mode — hold to keep firing.</Row>
-        <Row icon={<span className="kbd">F</span>}>Toggle AUTO / MANUAL fire. See the HUD & AIMING tab for what each does.</Row>
+        <Row icon={<span className="kbd">CLICK</span>}>Fire, if you switch to manual mode — hold to keep firing.</Row>
+        <Row icon={<span className="kbd">F</span>}>Toggle AUTO / MANUAL fire — starts on AUTO. See the HUD & AIMING tab for what each does.</Row>
         <Row icon={<span className="kbd">R</span>}>Reload. Also happens automatically the instant your mag runs dry.</Row>
         <Row icon={<span className="kbd">1</span>}>-<span className="kbd">4</span> Switch weapon class (pistol / SMG / shotgun / carbine) — see WEAPONS for how you unlock more.</Row>
       </Section>

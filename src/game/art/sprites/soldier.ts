@@ -110,6 +110,10 @@ export function drawSoldier(b: PixelBuf, dir: number, frame: number): void {
   const CHEST = -6.5 - bob;
   const HEAD = -10.8 - bob;
   const FOOT = 11.2 - bob * 0.4;
+  // where the engine actually draws the gun (chestY = feet - CHEST_H, a fixed
+  // world-space height independent of this sprite's own coordinate system) —
+  // the grip-hand must land exactly here or the arm visibly floats off the gun
+  const GRIP = -2 - bob;
 
   // ---- back leg, trailing behind the lean ----
   blob(b, ax, -stride * 0.9, FOOT, 2.3, 1.7, steel[3]);
@@ -151,9 +155,13 @@ export function drawSoldier(b: PixelBuf, dir: number, frame: number): void {
   blob(b, ax, 3.4, HEAD + 1.0, 1.1, 1.6, skin[1]);
   blob(b, ax, 3.9, HEAD + 1.0, 0.8, 1.4, RAMPS.visor[0]);
 
-  // ---- arm, reaching forward to the gun grip ----
-  limb(b, ax, 1.4, CHEST - 2.4, 6.6, CHEST + 0.4, 1.7, 1.4, suit[2]);
-  blob(b, ax, 6.9, CHEST + 0.6, 1.3, 1.2, skin[0]);
+  // ---- firing arm, shoulder to the actual grip point ----
+  limb(b, ax, 1.4, CHEST - 2.4, 6.4, GRIP, 1.7, 1.4, suit[2]);
+  blob(b, ax, 6.7, GRIP + 0.2, 1.3, 1.2, skin[0]);
+
+  // ---- support arm, tucked under for a two-handed hold ----
+  limb(b, ax, 2.2, CHEST - 1.0, 5.3, GRIP + 1.1, 1.5, 1.2, suit[3]);
+  blob(b, ax, 5.5, GRIP + 1.3, 1.0, 0.9, skin[0]);
 }
 
 /**
