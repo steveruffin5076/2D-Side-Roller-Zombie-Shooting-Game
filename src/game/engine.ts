@@ -853,13 +853,14 @@ export class Engine {
     }
     p.face = this.facing;
 
-    // Aim: flat along the faced lane, or angled up slightly at a locked
-    // target's head — about the only "aiming" a side view needs.
+    // Aim: flat along the faced lane, or angled at a locked target's body
+    // centre — about the only "aiming" a side view needs. `target.y` is feet
+    // (every character stands on GROUND), so the centre of mass sits `r`
+    // above that, same height hitZombie()/hitBoss() actually check against.
     this.acquireLaneTarget();
     if (this.target && !this.target.dead) {
-      const isBoss = this.target === this.boss;
       const tx = this.target.x;
-      const ty = isBoss ? this.target.y - 36 * this.target.scale : this.target.y - 20;
+      const ty = this.target.y - this.target.r;
       p.aim = Math.atan2(ty - (p.y - CHEST_H), tx - p.x);
     } else {
       p.aim = this.facing === 1 ? 0 : Math.PI;
@@ -2791,11 +2792,10 @@ export class Engine {
       c.moveTo(ex - Math.sin(p.aim) * 7, ey + Math.cos(p.aim) * 7);
       c.lineTo(ex + Math.sin(p.aim) * 7, ey - Math.cos(p.aim) * 7);
       c.stroke();
-      // dot on the locked target
+      // dot on the locked target's body centre, same height p.aim actually targets
       if (hot && this.target) {
-        const isBoss = this.target === this.boss;
         const tx = this.target.x - cam;
-        const ty = (isBoss ? this.target.y - 36 * this.target.scale : this.target.y) + camY;
+        const ty = this.target.y - this.target.r + camY;
         c.fillStyle = "rgba(255,70,70,0.9)";
         c.beginPath();
         c.arc(tx, ty, 3.5 + Math.sin(t * 20) * 1.2, 0, TAU);
