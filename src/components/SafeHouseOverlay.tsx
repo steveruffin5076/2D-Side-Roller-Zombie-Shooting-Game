@@ -10,7 +10,7 @@ interface Props {
   onContinue: () => void;
 }
 
-/** Shown after StageClear, before advanceStage() — resupply + backpack logistics. */
+/** Shown after BossClear, before continueAfterBoss() — resupply + backpack logistics. */
 export default function SafeHouseOverlay({ next, inv, onMove, onDepositAll, onContinue }: Props) {
   return (
     <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-gradient-to-b from-cyan-950/20 via-black/85 to-black/95 backdrop-blur-[5px]">
@@ -62,7 +62,7 @@ export default function SafeHouseOverlay({ next, inv, onMove, onDepositAll, onCo
           style={{ animationDelay: "220ms" }}
         >
           <Play className="h-5 w-5" fill="currentColor" />
-          ENTER STAGE {next}
+          ENTER WAVE {next}
         </button>
       </div>
     </div>

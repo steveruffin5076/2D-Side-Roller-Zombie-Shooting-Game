@@ -10,15 +10,15 @@ import { ICONS, RARITY_STYLE, MenuButton, StatBox } from "./ui";
 
 export function Menu({
   onEndless, onTutorial, onSettings, high, muted, onMute, touch = false,
-  savedStage = null, onContinue,
+  savedWave = null, onContinue,
   canFullscreen = false, fullscreen = false, onFullscreen,
 }: {
   onEndless: () => void; onTutorial: () => void; onSettings: () => void;
   high: number; muted: boolean; onMute: () => void;
   /** swaps the keyboard hint row for the on-screen control equivalents */
   touch?: boolean;
-  /** stage a saved run would resume at — null hides Continue entirely */
-  savedStage?: number | null;
+  /** wave a saved run would resume at — null hides Continue entirely */
+  savedWave?: number | null;
   onContinue?: () => void;
   /** hidden where the Fullscreen API isn't available (notably iPhone Safari) */
   canFullscreen?: boolean;
@@ -79,28 +79,28 @@ export function Menu({
         survivor. Every shot you fire tells them exactly where you are.
       </p>
 
-      {savedStage != null && (
+      {savedWave != null && (
         <button
           onClick={onContinue}
           className="anim-rise group relative mt-9 flex items-center gap-3 overflow-hidden rounded-xl bg-gradient-to-b from-emerald-400 to-emerald-600 px-12 py-4 text-xl font-bold tracking-[0.25em] text-emerald-950 shadow-[0_0_50px_rgba(52,211,153,0.35)] transition-all duration-200 hover:scale-[1.04] hover:shadow-[0_0_70px_rgba(52,211,153,0.5)] active:scale-[0.98]"
           style={{ animationDelay: "180ms" }}
         >
           <FastForward className="h-5 w-5 transition-transform group-hover:translate-x-0.5" />
-          CONTINUE · STAGE {savedStage}
+          CONTINUE · WAVE {savedWave}
         </button>
       )}
 
       <button
         onClick={onEndless}
         className={`anim-rise group relative flex items-center gap-3 overflow-hidden rounded-xl transition-all duration-200 hover:scale-[1.04] active:scale-[0.98] ${
-          savedStage != null
+          savedWave != null
             ? "mt-3 border border-white/12 bg-white/5 px-8 py-2.5 text-sm font-bold tracking-[0.2em] text-zinc-300 hover:border-white/30 hover:bg-white/10"
             : "mt-9 bg-gradient-to-b from-amber-400 to-amber-600 px-12 py-4 text-xl font-bold tracking-[0.25em] text-amber-950 shadow-[0_0_50px_rgba(245,158,11,0.35)] hover:shadow-[0_0_70px_rgba(245,158,11,0.5)]"
         }`}
-        style={{ animationDelay: savedStage != null ? "210ms" : "180ms" }}
+        style={{ animationDelay: savedWave != null ? "210ms" : "180ms" }}
       >
-        <InfinityIcon className={savedStage != null ? "h-4 w-4" : "h-5 w-5 transition-transform group-hover:translate-x-0.5"} />
-        {savedStage != null ? "NEW RUN" : "ENDLESS MODE"}
+        <InfinityIcon className={savedWave != null ? "h-4 w-4" : "h-5 w-5 transition-transform group-hover:translate-x-0.5"} />
+        {savedWave != null ? "NEW RUN" : "ENDLESS MODE"}
       </button>
 
       <button
@@ -233,26 +233,23 @@ export function PauseMenu({
 
 /* ------------------------------------------------------------------ */
 
-export function StageClear({
-  stage, next, stageName, wavesPerStage, onContinue,
-}: { stage: number; next: number; stageName: string; wavesPerStage: number; onContinue: () => void }) {
+export function BossClear({
+  wave, next, onContinue,
+}: { wave: number; next: number; onContinue: () => void }) {
   return (
     <div className="pointer-events-auto absolute inset-0 z-40 flex items-center-safe justify-center overflow-y-auto bg-gradient-to-b from-emerald-950/30 via-black/80 to-black/90 py-4 backdrop-blur-[5px]">
       <div className="anim-pop flex w-full max-w-lg flex-col items-center px-8 text-center">
         <div className="anim-rise mb-3 flex items-center gap-3 text-[13px] font-bold tracking-[0.45em] text-emerald-300/80">
           <span className="h-px w-8 bg-emerald-400/40" />
-          {wavesPerStage} / {wavesPerStage} WAVES SURVIVED
+          BOSS DOWN
           <span className="h-px w-8 bg-emerald-400/40" />
         </div>
         <h2
           className="anim-rise font-display text-6xl tracking-[0.1em] text-emerald-300 drop-shadow-[0_0_34px_rgba(52,211,153,0.45)]"
           style={{ animationDelay: "60ms" }}
         >
-          STAGE {stage} CLEAR
+          WAVE {wave} CLEAR
         </h2>
-        <p className="anim-rise mt-2 text-lg font-semibold text-white" style={{ animationDelay: "90ms" }}>
-          {stageName}
-        </p>
         <p className="anim-rise mt-3 max-w-sm text-base leading-relaxed text-zinc-400" style={{ animationDelay: "120ms" }}>
           You held the line. Wounds patched, ammo scavenged — but the horde grows
           hungrier the deeper you go.
@@ -260,7 +257,7 @@ export function StageClear({
 
         <div className="anim-rise mt-6 flex items-center gap-6" style={{ animationDelay: "170ms" }}>
           <div className="flex flex-col items-center">
-            <div className="font-display text-4xl text-zinc-100">{stage}</div>
+            <div className="font-display text-4xl text-zinc-100">{wave}</div>
             <div className="text-[11px] font-bold tracking-[0.25em] text-zinc-500">CLEARED</div>
           </div>
           <ChevronsRight className="h-6 w-6 text-amber-400" />
@@ -272,7 +269,7 @@ export function StageClear({
 
         <div className="anim-rise mt-5 flex items-center gap-2 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-4 py-1.5 text-[13px] font-bold tracking-[0.2em] text-emerald-300" style={{ animationDelay: "200ms" }}>
           <HeartPulse className="h-3.5 w-3.5" />
-          FULL HEAL + STAGE BONUS
+          FULL HEAL + BOSS BONUS
         </div>
 
         <button
@@ -314,7 +311,7 @@ export function GameOver({ stats, onRestart, onQuit }: { stats: GameStats; onRes
         )}
 
         <div className="anim-rise mt-7 grid w-full grid-cols-3 gap-3" style={{ animationDelay: "180ms" }}>
-          <StatBox icon={<TrendingUp className="h-4 w-4" />} label="STAGE" value={`${stats.stage}-${stats.wave}`} />
+          <StatBox icon={<TrendingUp className="h-4 w-4" />} label="WAVE" value={String(stats.wave)} />
           <StatBox icon={<Skull className="h-4 w-4" />} label="KILLS" value={stats.kills.toLocaleString()} />
           <StatBox icon={<Timer className="h-4 w-4" />} label="TIME" value={`${mins}:${String(secs).padStart(2, "0")}`} />
           <StatBox icon={<Trophy className="h-4 w-4" />} label="SCORE" value={stats.score.toLocaleString()} accent />

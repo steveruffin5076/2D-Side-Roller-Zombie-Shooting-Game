@@ -81,16 +81,12 @@ export default function Hud({
         </div>
       </div>
 
-      {/* top-center: stage + wave, or travel progress */}
+      {/* top-center: the one endless wave counter — no stages or acts */}
       <div className="absolute left-1/2 top-4 -translate-x-1/2 text-center">
-        <div className="text-[12px] font-bold tracking-[0.42em] text-white/45">
-          STAGE {hud.stage}
-        </div>
-        <div className="text-base font-semibold text-white">{hud.stageName}</div>
         {hud.phase === "break" && hud.breakT > 3 ? (
           <>
             <div className="font-display text-3xl tracking-[0.18em] text-emerald-300 drop-shadow-[0_0_14px_rgba(52,211,153,0.45)]">
-              GET READY — WAVE {Math.max(1, hud.waveInStage + 1)}
+              GET READY — WAVE {hud.wave + 1}
             </div>
             <div className="mx-auto mt-1.5 h-1.5 w-56 overflow-hidden rounded-full border border-white/10 bg-black/60">
               <div
@@ -106,20 +102,21 @@ export default function Hud({
           <>
             <div
               className={`font-display text-3xl tracking-[0.18em] ${
-                hud.hordeT > 0 || hud.isBossWave
+                hud.isBossWave
                   ? "text-red-400 drop-shadow-[0_0_16px_rgba(239,68,68,0.6)] animate-pulse"
                   : "text-amber-300 drop-shadow-[0_0_14px_rgba(245,158,11,0.45)]"
               }`}
             >
-              {hud.hordeT > 0 ? "HORDE" : hud.isBossWave ? "BOSS WAVE" : `WAVE ${Math.max(1, hud.waveInStage)}`}
+              {hud.isBossWave ? "BOSS WAVE" : `WAVE ${Math.max(1, hud.wave)}`}
             </div>
-            {/* per-stage wave pips */}
+            {/* position within the current 5-wave cycle up to the next boss */}
             <div className="mt-1.5 flex items-center justify-center gap-1">
-              {Array.from({ length: hud.wavesPerStage }).map((_, i) => {
+              {Array.from({ length: 5 }).map((_, i) => {
                 const n = i + 1;
-                const done = n < hud.waveInStage;
-                const cur = n === hud.waveInStage;
-                const boss = hud.bossWaves.includes(n);
+                const cyclePos = hud.wave > 0 ? ((hud.wave - 1) % 5) + 1 : 0;
+                const done = n < cyclePos;
+                const cur = n === cyclePos;
+                const boss = n === 5;
                 return (
                   <span
                     key={i}
@@ -138,9 +135,7 @@ export default function Hud({
             </div>
             <div className="mt-1.5 flex items-center justify-center gap-1.5 text-[13px] font-semibold tracking-widest text-white/55">
               <Skull className="h-3.5 w-3.5" />
-              {hud.hordeT > 0
-                ? `SURVIVE ${Math.ceil(hud.hordeT)}s`
-                : hud.waveInStage > 0 ? `${hud.remaining} REMAIN` : "GET READY"}
+              {hud.wave > 0 ? `${hud.remaining} REMAIN` : "GET READY"}
             </div>
           </>
         )}
@@ -449,7 +444,7 @@ export default function Hud({
       )}
 
       {/* bottom-center: controls hint */}
-      {!touch && hud.stage === 1 && hud.waveInStage <= 1 && (
+      {!touch && hud.wave <= 1 && (
         <div className="absolute bottom-6 left-1/2 flex -translate-x-1/2 items-center gap-4 text-[12px] font-semibold tracking-wider text-white/35">
           <span><span className="kbd">A</span> <span className="kbd">D</span> MOVE</span>
           <span><span className="kbd">SHIFT</span> DASH</span>

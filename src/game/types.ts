@@ -22,18 +22,12 @@ export interface HudState {
   xp: number;
   xpNext: number;
   level: number;
-  stage: number;
-  stageName: string;
-  waveInStage: number;
-  wavesPerStage: number;
-  /** in-stage wave numbers (1-based) that spawn a boss */
-  bossWaves: number[];
+  /** the one global wave counter — no stages or acts, just 1, 2, 3, … forever */
+  wave: number;
+  /** true every 5th wave (5, 10, 15, …) — a boss fight instead of ordinary fodder */
   isBossWave: boolean;
   remaining: number;
   waveTotal: number;
-  /** seconds left in a stage-5/10 horde finale; 0 when none is running */
-  hordeT: number;
-  hordeTotal: number;
   phase: "break" | "active" | "prep";
   score: number;
   kills: number;
@@ -66,10 +60,10 @@ export interface HudState {
   /** 0..1 hold-to-open progress */
   crateOpenPct: number;
   /** seconds left in the rest before the next wave, and what it started at —
-   * the HUD only draws a countdown for the long ones (the boss stage's opener) */
+   * the HUD only draws a countdown for the long ones (after a boss falls) */
   breakT: number;
   breakMax: number;
-  /** a Terminal Defense boss is alive — gates the 3-segment boss bar */
+  /** the boss is alive — gates the 3-segment boss bar */
   bossActive: boolean;
   /** display name for the boss bar — data-driven per BOSS_DEFS, null when no boss is active */
   bossName: string | null;
@@ -97,7 +91,6 @@ export interface UpgradeChoice {
 }
 
 export interface GameStats {
-  stage: number;
   wave: number;
   kills: number;
   level: number;
@@ -144,5 +137,5 @@ export type EngineEvent =
   | { type: "levelup"; choices: UpgradeChoice[] }
   | { type: "resume" }
   | { type: "gameover"; stats: GameStats }
-  | { type: "stageclear"; stage: number; next: number; stageName: string; stageSub: string; wavesPerStage: number }
+  | { type: "bossclear"; wave: number; next: number }
   | { type: "pause"; value: boolean };

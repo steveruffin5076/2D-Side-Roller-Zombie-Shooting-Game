@@ -1,13 +1,14 @@
 import type { PlacedItem } from "./grid";
 import type { WeaponClass } from "./weapons";
 
-export const SAVE_VERSION = 3;
+export const SAVE_VERSION = 4;
 
-/** A single run's checkpoint — written at every stage clear, restored on death
- * to resume from the last safe house. Resets to nothing on a genuine game over. */
+/** A single run's checkpoint — written at every boss-wave clear, restored on
+ * death to resume from there. Resets to nothing on a genuine game over. */
 export interface SaveData {
   version: number;
-  stage: number;
+  /** the wave to resume at — always one past the boss wave just cleared */
+  wave: number;
   level: number;
   xp: number;
   xpNext: number;
@@ -27,14 +28,16 @@ const SAVE_KEY = "graveyard-shift-save";
 export function migrate(raw: unknown): SaveData | null {
   if (!raw || typeof raw !== "object") return null;
   const d = raw as Partial<SaveData>;
-  if (typeof d.version !== "number" || d.version > SAVE_VERSION || d.version < 3) return null;
+  // version 3 and earlier were stage-based (a different shape entirely) —
+  // rather than migrate a "stage" into a "wave", just drop the old save
+  if (typeof d.version !== "number" || d.version > SAVE_VERSION || d.version < 4) return null;
   if (
-    typeof d.stage !== "number" || typeof d.level !== "number" ||
+    typeof d.wave !== "number" || typeof d.level !== "number" ||
     !Array.isArray(d.deposit) || !Array.isArray(d.backpack)
   ) return null;
   return {
     version: SAVE_VERSION,
-    stage: d.stage,
+    wave: d.wave,
     level: d.level,
     xp: d.xp ?? 0,
     xpNext: d.xpNext ?? 12,

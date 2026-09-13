@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { migrate, SAVE_VERSION, type SaveData } from "./save";
 
 const valid: SaveData = {
-  version: SAVE_VERSION, stage: 2, level: 3, xp: 5, xpNext: 40,
+  version: SAVE_VERSION, wave: 6, level: 3, xp: 5, xpNext: 40,
   score: 1200, kills: 30, playTime: 210,
   kind: "p365", stacks: { dmg: 2 }, deposit: [], backpack: [{ id: "a", itemId: "bandage", x: 0, y: 0 }],
 };
@@ -33,7 +33,7 @@ describe("migrate", () => {
 
   it("fills in sensible defaults for optional fields", () => {
     const minimal = {
-      version: SAVE_VERSION, stage: 1, level: 1, deposit: [], backpack: [],
+      version: SAVE_VERSION, wave: 1, level: 1, deposit: [], backpack: [],
     };
     const result = migrate(minimal);
     expect(result).not.toBeNull();

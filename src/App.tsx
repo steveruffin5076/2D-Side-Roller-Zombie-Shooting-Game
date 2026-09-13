@@ -6,7 +6,7 @@ import type {
 import type { ConsumableKey } from "./game/items";
 import type { AttachmentId } from "./game/attachments";
 import Hud from "./components/Hud";
-import { Menu, LevelUpModal, PauseMenu, GameOver, StageClear } from "./components/Overlays";
+import { Menu, LevelUpModal, PauseMenu, GameOver, BossClear } from "./components/Overlays";
 import InventoryOverlay from "./components/InventoryOverlay";
 import SafeHouseOverlay from "./components/SafeHouseOverlay";
 import TouchControls from "./components/TouchControls";
@@ -43,10 +43,10 @@ export default function App() {
   const [touch] = useState(() =>
     isTouchCapable(navigator.maxTouchPoints, window.matchMedia("(pointer: coarse)").matches)
   );
-  // stage a saved run would resume at, or null. Refreshed only at the moments it
+  // wave a saved run would resume at, or null. Refreshed only at the moments it
   // can change (mount, quitting to the menu, starting/continuing a run) rather
   // than polled — HudState is for the 66ms combat poll, not rare menu data.
-  const [savedStage, setSavedStage] = useState<number | null>(null);
+  const [savedWave, setSavedWave] = useState<number | null>(null);
   const [canFullscreen] = useState(supportsFullscreen);
   const [fullscreen, setFullscreen] = useState(false);
   // track the real state, not just our own clicks — Esc and the system back
@@ -70,8 +70,8 @@ export default function App() {
     return () => ro.disconnect();
   }, []);
 
-  const [stageClear, setStageClear] = useState<{ stage: number; next: number; stageName: string; wavesPerStage: number } | null>(null);
-  const [stageLoadout, setStageLoadout] = useState(false);
+  const [bossClear, setBossClear] = useState<{ wave: number; next: number } | null>(null);
+  const [bossLoadout, setBossLoadout] = useState(false);
   const [safeHouse, setSafeHouse] = useState(false);
   const [inv, setInv] = useState<InventorySnapshot | null>(null);
   const [showInventory, setShowInventory] = useState(false);
@@ -90,13 +90,13 @@ export default function App() {
         case "gameover":
           setOver(e.stats);
           setChoices(null);
-          setStageClear(null);
+          setBossClear(null);
           setSafeHouse(false);
           setPaused(false);
           break;
-        case "stageclear":
-          setStageClear({ stage: e.stage, next: e.next, stageName: e.stageName, wavesPerStage: e.wavesPerStage });
-          setStageLoadout(false);
+        case "bossclear":
+          setBossClear({ wave: e.wave, next: e.next });
+          setBossLoadout(false);
           setSafeHouse(false);
           break;
         case "pause":
@@ -106,7 +106,7 @@ export default function App() {
     });
     engineRef.current = engine;
     engine.begin();
-    setSavedStage(engine.savedRunStage());
+    setSavedWave(engine.savedRunWave());
     // ?debug=1 exposes the engine on window for the same debug tooling that
     // draws the ?debug=1 HUD overlay (see engine.ts render()) — lets manual
     // QA fast-forward wave/stage state instead of grinding real playtime.
@@ -140,12 +140,12 @@ export default function App() {
     setShowSettings(false);
     setOver(null);
     setChoices(null);
-    setStageClear(null);
-    setStageLoadout(false);
+    setBossClear(null);
+    setBossLoadout(false);
     setSafeHouse(false);
     setShowInventory(false);
     setPaused(false);
-    setSavedStage(engineRef.current?.savedRunStage() ?? null);
+    setSavedWave(engineRef.current?.savedRunWave() ?? null);
   }, []);
 
   const start = useCallback(() => {
@@ -188,33 +188,33 @@ export default function App() {
 
   const quit = useCallback(() => {
     engineRef.current?.toMenu();
-    setSavedStage(engineRef.current?.savedRunStage() ?? null);
+    setSavedWave(engineRef.current?.savedRunWave() ?? null);
     setScreen("menu");
     setShowLoadout(false);
     setShowTutorial(false);
     setShowSettings(false);
     setOver(null);
     setChoices(null);
-    setStageClear(null);
-    setStageLoadout(false);
+    setBossClear(null);
+    setBossLoadout(false);
     setSafeHouse(false);
     setShowInventory(false);
     setPaused(false);
   }, []);
 
-  // StageClear's "CONTINUE" opens the loadout screen first — a level gained
-  // mid-stage can actually be spent on a new weapon before the next stage —
+  // BossClear's "CONTINUE" opens the loadout screen first — a level gained
+  // mid-fight can actually be spent on a new weapon before the next wave —
   // then the safe house's resupply/backpack screen; SafeHouseOverlay's own
-  // continue button is what actually calls advanceStage().
-  const openStageLoadout = useCallback(() => setStageLoadout(true), []);
-  const confirmStageLoadout = useCallback(() => {
-    setStageLoadout(false);
+  // continue button is what actually calls continueAfterBoss().
+  const openBossLoadout = useCallback(() => setBossLoadout(true), []);
+  const confirmBossLoadout = useCallback(() => {
+    setBossLoadout(false);
     setSafeHouse(true);
   }, []);
   const confirmSafeHouse = useCallback(() => {
-    engineRef.current?.advanceStage();
+    engineRef.current?.continueAfterBoss();
     setSafeHouse(false);
-    setStageClear(null);
+    setBossClear(null);
   }, []);
   const depositAll = useCallback(() => engineRef.current?.depositAll(), []);
   const moveBackpackItem = useCallback(
@@ -311,7 +311,7 @@ export default function App() {
             onFullscreen={goFullscreen}
           />
         )}
-        {screen === "game" && touch && !paused && !choices && !over && !stageClear && !showInventory && (
+        {screen === "game" && touch && !paused && !choices && !over && !bossClear && !showInventory && (
           <TouchControls
             onPressKey={pressKey}
             onReleaseKey={releaseKey}
@@ -336,7 +336,7 @@ export default function App() {
             muted={hud?.muted ?? false}
             onMute={toggleMute}
             touch={touch}
-            savedStage={savedStage}
+            savedWave={savedWave}
             onContinue={continueGame}
             canFullscreen={canFullscreen}
             fullscreen={fullscreen}
@@ -370,30 +370,28 @@ export default function App() {
 
         {choices && <LevelUpModal choices={choices} level={hud?.level ?? 1} onPick={choose} />}
 
-        {stageClear && !stageLoadout && !safeHouse && !choices && !over && (
-          <StageClear
-            stage={stageClear.stage}
-            next={stageClear.next}
-            stageName={stageClear.stageName}
-            wavesPerStage={stageClear.wavesPerStage}
-            onContinue={openStageLoadout}
+        {bossClear && !bossLoadout && !safeHouse && !choices && !over && (
+          <BossClear
+            wave={bossClear.wave}
+            next={bossClear.next}
+            onContinue={openBossLoadout}
           />
         )}
 
-        {stageClear && stageLoadout && !safeHouse && !choices && !over && profile && (
+        {bossClear && bossLoadout && !safeHouse && !choices && !over && profile && (
           <LoadoutProfile
             profile={profile}
-            onClose={confirmStageLoadout}
-            onStart={confirmStageLoadout}
+            onClose={confirmBossLoadout}
+            onStart={confirmBossLoadout}
             onSelectLoadout={selectLoadout}
             onEquipAttachment={equipAttachment}
             ctaLabel="CONTINUE"
           />
         )}
 
-        {stageClear && safeHouse && !choices && !over && inv && (
+        {bossClear && safeHouse && !choices && !over && inv && (
           <SafeHouseOverlay
-            next={stageClear.next}
+            next={bossClear.next}
             inv={inv}
             onMove={moveBackpackItem}
             onDepositAll={depositAll}
@@ -401,7 +399,7 @@ export default function App() {
           />
         )}
 
-        {showInventory && screen === "game" && inv && !choices && !stageClear && !paused && !over && (
+        {showInventory && screen === "game" && inv && !choices && !bossClear && !paused && !over && (
           <InventoryOverlay inv={inv} onMove={moveBackpackItem} onClose={() => setShowInventory(false)} />
         )}
 

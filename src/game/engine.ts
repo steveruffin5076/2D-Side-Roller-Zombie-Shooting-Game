@@ -6,7 +6,7 @@ import {
 import { Sfx } from "./audio";
 import { loadSettings, saveSettings } from "./settings";
 import { ATTACHMENT_ORDER, applyAttachment, unlockedAttachments, weaponLevelFor, type AttachmentId } from "./attachments";
-import { stageDefFor, cumulativeWaveIndex, difficultyFor, rollEnemy, type StageDef } from "./stages";
+import { isBossWave, difficultyFor, rollEnemy } from "./waves";
 import { WEAPON_UNLOCK_LEVEL, metaXpFor, ownedWeaponsForLevel, isWeaponUnlocked } from "./progression";
 import { THEMES, type ThemeDef } from "./themes";
 import { BACKPACK_SIZE, moveItem, placeItem, removeItem, type PlacedItem } from "./grid";
@@ -40,7 +40,10 @@ const GROUND = 584;
 /** Chest/gun height above GROUND — everything that aims or fires does so from
  * here, not from the feet the position actually tracks. */
 const CHEST_H = 30;
-/** Theme order the per-theme stage wrecks are authored in (see props.ts). */
+/** One continuous world — no more stages/acts to switch between, so this is
+ * the whole map, wide enough that the wreck set-piece and decor have room. */
+const WORLD_W = 2880;
+/** Theme order the per-theme wrecks are authored in (see props.ts). */
 const WRECK_THEMES = ["cemetery", "suburbs", "highway", "arena"];
 const TAU = Math.PI * 2;
 /** Settings zoom bounds. The floor is 1 on purpose: at >= 1 the visible world
@@ -64,7 +67,7 @@ const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
  * derive a boss's torso/limb/head tones from one BossDef.color. */
 
 type ZType = "walker" | "runner" | "brute" | "spitter" | "screamer";
-type ModalKind = "levelup" | "stageclear";
+type ModalKind = "levelup" | "bossclear";
 
 interface ZConf {
   hp: number; speed: number; dmg: number; r: number; scale: number; xp: number; score: number;
@@ -84,13 +87,7 @@ const ZCONF: Record<ZType, ZConf> = {
  * base roster, so she stays a fixed low-probability spice pick, never fodder. */
 const SCREAMER_WEIGHT = 0.18;
 
-/** Stages whose final wave is a horde finale instead of a normal wave — a
- * sustained swarm with a boss-tier zombie mixed in, capping the stage with a
- * real set piece rather than just another wave-sized batch. */
-const HORDE_STAGES = [5, 10];
-const HORDE_DURATION = 60;
-
-/** How long the Terminal Defense boss spends rising out of its grave —
+/** How long the boss spends rising out of its grave —
  * invulnerable and inert — before the fight actually starts. */
 const BOSS_EMERGE_DURATION = 1.6;
 
@@ -195,9 +192,8 @@ export class Engine {
   readonly sfx = new Sfx();
   private debug = new URLSearchParams(window.location.search).get("debug") === "1";
 
-  private stageDef: StageDef = stageDefFor(1);
-  private worldW = this.stageDef.worldW;
-  private theme: ThemeDef = THEMES[this.stageDef.themeId];
+  private worldW = WORLD_W;
+  private theme: ThemeDef = THEMES.cemetery;
 
   private raf = 0;
   private last = 0;
@@ -267,9 +263,9 @@ export class Engine {
   private texts: FloatText[] = [];
   private decals: Decal[] = [];
 
-  /* --- boss: The Juggernaut Alpha, spawned on each stage's mid-stage boss wave --- */
+  /* --- boss: The Juggernaut Alpha, spawned every 5th wave --- */
   private boss: Boss | null = null;
-  /** where the boss's grave split open — a lasting visual scar, cleared on the next stage */
+  /** where the boss's grave split open — a lasting visual scar */
   private bossGrave: { x: number; y: number } | null = null;
   /** toggled by KeyE while the boss is alive — forces auto-aim onto it over a close add */
   private bossForceTarget = false;
@@ -278,10 +274,8 @@ export class Engine {
   private spawnSuppressT = 0;
 
   private power = 0;             // difficulty scalar, drives every balance formula
-  private waveIndex = 0;         // monotonic global wave number, for display only
-  private stage = 1;
-  private waveInStage = 0;       // 1..stageDef.wavesPerStage
-  private stageIntermission = false;
+  /** the one global progression counter — no stages or acts, just wave 1, 2, 3, … forever */
+  private wave = 0;
   private phase: "break" | "active" | "prep" = "break";
   private breakT = 0;
   /** what breakT started at — the HUD draws a countdown bar against it */
@@ -289,9 +283,6 @@ export class Engine {
   private spawnT = 0;
   private queue: SpawnItem[] = [];
   private waveTotal = 0;
-  /** >0 while a stage-5/10 horde finale is running — see HORDE_STAGES/HORDE_DURATION */
-  private hordeT = 0;
-  private hordeTotal = 0;
 
   /* --- inventory: fixed 4x4 backpack, a persistent safe-house stash, loot crates --- */
   private backpack: PlacedItem[] = [];
@@ -372,11 +363,12 @@ export class Engine {
     this.canvas.removeEventListener("contextmenu", this.onCtx);
   }
 
-  /** Starts a fresh run at stage 1, discarding any saved one. The discard
+  /** Starts a fresh run at wave 1, discarding any saved one. The discard
    * matters: die() restores from whatever checkpoint exists, so without it a
-   * new run that ended in stage 1 would warp the player into the *previous*
-   * run's stage. Also reached from the pause menu's RESTART and game-over's
-   * RETRY, where starting over should likewise not inherit an old checkpoint. */
+   * new run that never reached a checkpoint would warp the player into the
+   * *previous* run's progress. Also reached from the pause menu's RESTART and
+   * game-over's RETRY, where starting over should likewise not inherit an old
+   * checkpoint. */
   startGame() {
     this.sfx.ensure();
     clearRun();
@@ -387,12 +379,12 @@ export class Engine {
     this.phase = "break";
     this.breakT = 2.2;
     this.breakMax = 2.2;
-    this.announce(`STAGE 1 — ${this.stageDef.name}`, this.stageDef.sub, 2.6);
+    this.announce("THE DEAD DON'T SLEEP", "hold the line as long as you can", 2.6);
   }
 
   toMenu() {
     // flush this run's lifetime meta-progress — it's otherwise only persisted
-    // at stage-clear/death, so quitting mid-stage would silently drop it
+    // at a boss-wave clear/death, so quitting mid-run would silently drop it
     saveProfile(this.profile);
     this.reset();
     this.mode = "attract";
@@ -519,8 +511,8 @@ export class Engine {
 
   private reset() {
     this.power = 0;
-    this.waveIndex = 0;
-    this.setStage(1);
+    this.wave = 0;
+    this.initWorld();
     this.pl = this.freshPlayer();
     this.st = this.baseStats();
     this.stacks = {};
@@ -559,8 +551,6 @@ export class Engine {
     this.boss = null;
     this.bossForceTarget = false;
     this.spawnSuppressT = 0;
-    this.waveInStage = 0;
-    this.stageIntermission = false;
     this.waveTotal = 0;
     this.queue = [];
     this.backpack = [];
@@ -586,18 +576,17 @@ export class Engine {
     this.mouse.down = false;
   }
 
-  /** Switches to a stage's def/world width/theme and regenerates decor to fit. */
-  private setStage(stageNum: number) {
-    this.stage = stageNum;
-    this.stageDef = stageDefFor(stageNum);
-    this.worldW = this.stageDef.worldW;
-    this.theme = THEMES[this.stageDef.themeId];
+  /** Sets up the one continuous world a run plays in — called once per run,
+   * never again, since there are no more stages/acts to switch between. */
+  private initWorld() {
+    this.worldW = WORLD_W;
+    this.theme = THEMES.cemetery;
     this.genDecor(this.theme, this.worldW);
     this.bossGrave = null;
   }
 
   private genDecor(theme: ThemeDef, worldW: number) {
-    // stage transitions call this again — never accumulate across runs
+    // called once per run, from initWorld() — never accumulate across runs
     this.decor = [];
     this.tufts = [];
     this.theme = theme;
@@ -624,11 +613,9 @@ export class Engine {
       this.decor.push({ x, y: GROUND, kind, v: Math.floor(R(0, PROP_VARIANTS)), ph: R(0, TAU) });
     }
 
-    // One set-piece wreck per stage — a landmark to navigate by. Placed from
-    // the stage number rather than randomly, so a given stage always reads
-    // the same, and pushed clear of the spawn point.
+    // One set-piece wreck — a landmark to navigate by — pushed clear of the spawn point.
     const themeIdx = WRECK_THEMES.indexOf(theme.id);
-    let wx = worldW * (0.22 + ((this.stage * 7) % 5) * 0.14);
+    let wx = worldW * R(0.22, 0.78);
     if (Math.abs(wx - spawnX) < 260) wx += wx < spawnX ? -worldW * 0.18 : worldW * 0.18;
     wx = clamp(wx, 90, worldW - 90);
     this.decor.push({ x: wx, y: GROUND, kind: WRECK_KIND, v: Math.max(0, themeIdx), ph: 0 });
@@ -907,49 +894,33 @@ export class Engine {
     this.updateCrates(dt);
     this.updateGrenades(dt);
 
-    // waves / travel
+    // waves — one endless counter, no stages/acts to advance between
     if (this.phase === "break") {
-      if (!this.stageIntermission) {
-        this.breakT -= dt;
-        if (this.breakT <= 0) this.startWave(this.waveInStage + 1);
-      }
+      this.breakT -= dt;
+      if (this.breakT <= 0) this.startWave(this.wave + 1);
     } else if (this.phase === "active") {
       if (this.spawnSuppressT > 0) this.spawnSuppressT -= dt;
       this.spawnT -= dt;
       const cap = Math.min(42, 10 + this.power * 1.1);
-      if (this.hordeT > 0) {
-        // continuously refilled stream instead of a fixed queue — the horde
-        // doesn't run out until its timer does, not when a batch is dead
-        this.hordeT = Math.max(0, this.hordeT - dt);
-        if (this.spawnSuppressT <= 0 && this.spawnT <= 0 && this.zombies.length < cap + 8) {
-          this.spawnT = Math.max(0.16, 1.0 - this.power * 0.07);
-          this.spawnZombie({ type: rollEnemy(this.zombieWeights(this.power)) as ZType });
-        }
-      } else if (this.spawnSuppressT <= 0 && this.spawnT <= 0 && this.queue.length > 0 && this.zombies.length < cap) {
+      if (this.spawnSuppressT <= 0 && this.spawnT <= 0 && this.queue.length > 0 && this.zombies.length < cap) {
         this.spawnT = Math.max(0.2, 1.15 - this.power * 0.08);
         const n = this.power >= 4 && this.queue.length > 2 && chance(0.45) ? 2 : 1;
         for (let i = 0; i < n && this.queue.length > 0; i++) this.spawnZombie(this.queue.shift()!);
       }
-      if (this.hordeT <= 0 && this.queue.length === 0 && this.zombies.length === 0 && (!this.boss || this.boss.dead)) {
+      if (this.queue.length === 0 && this.zombies.length === 0 && (!this.boss || this.boss.dead)) {
         this.score += 50 * this.power;
-        if (this.waveInStage >= this.stageDef.wavesPerStage) {
-          // clearing the last wave finishes the stage directly — no more
-          // walk-to-the-safe-house corridor with gates to clear; that was a
-          // side-scroller-era mechanic that doesn't fit open 2D exploration
-          this.completeStage();
+        if (isBossWave(this.wave)) {
+          // a boss wave clear is the run's checkpoint — same beat the old
+          // stage-clear screen hit, just every 5th wave instead of once per stage
+          this.completeBossWave();
         } else {
-          const boss = this.stageDef.bossWaves.includes(this.waveInStage);
-          // exploration stages carry no bossWaves at all, so without this,
-          // every mid-stage crate there would be stuck at tier 1 forever —
-          // grenades (tier 2+) and stims (tier 3) need a periodic step up too
-          const milestone = this.waveInStage % 5 === 0;
+          const milestone = this.wave % 3 === 0;
           this.beginRest(1.4);
-          if (this.stageDef.bossId != null) this.awardSupply(0.18, 0.6);
-          else p.hp = Math.min(this.st.maxHp, p.hp + 12);
-          this.spawnCrate(boss ? (chance(0.5) ? 3 : 2) : milestone ? 2 : 1);
+          p.hp = Math.min(this.st.maxHp, p.hp + 12);
+          this.spawnCrate(milestone ? 2 : 1);
           this.announce(
-            `WAVE ${this.waveInStage} CLEARED`,
-            `${this.stageDef.wavesPerStage - this.waveInStage} to go — breathe while you can`
+            `WAVE ${this.wave} CLEARED`,
+            `wave ${this.wave + 1} next — breathe while you can`
           );
         }
       }
@@ -1737,14 +1708,14 @@ export class Engine {
     const p = this.pl;
     for (let i = 0; i < 40; i++)
       this.particles.push({ x: p.x, y: p.y - 34, vx: R(-260, 260), vy: R(-320, 40), life: R(0.4, 1), max: 1, size: R(2, 6), color: chance(0.6) ? BLOOD[RI(0, BLOOD.length - 1)] : "#0e7490", grav: 1100, add: false });
-    this.profile.bestWave = Math.max(this.profile.bestWave, this.waveIndex);
+    this.profile.bestWave = Math.max(this.profile.bestWave, this.wave);
     saveProfile(this.profile);
-    // Decisions locked: restart at the last safe house, keep level/XP/upgrades/
+    // Decisions locked: restart at the last checkpoint, keep level/XP/upgrades/
     // weapons/deposit/progression, lose the carried backpack. Only a genuine
-    // game-over (no checkpoint reached yet) ends the run.
+    // game-over (no checkpoint reached yet — before wave 5) ends the run.
     const checkpoint = loadRun();
     if (checkpoint) {
-      this.retryStage(checkpoint);
+      this.retryFromCheckpoint(checkpoint);
       return;
     }
     this.over = true;
@@ -1754,24 +1725,26 @@ export class Engine {
       localStorage.setItem("graveyard-shift-high", String(this.high));
     }
     const stats: GameStats = {
-      stage: this.stage, wave: this.waveInStage, kills: this.kills, level: this.pl.level,
+      wave: this.wave, kills: this.kills, level: this.pl.level,
       score: this.score, time: this.playTime, best: this.high, isBest,
     };
     this.onEvent({ type: "gameover", stats });
   }
 
-  /** reset() then restore progression from the last safe-house checkpoint. Shared
-   * by dying (which drops the carried backpack as the penalty) and by resuming a
+  /** reset() then restore progression from the last checkpoint. Shared by
+   * dying (which drops the carried backpack as the penalty) and by resuming a
    * saved run from the menu (which doesn't — nobody died, the player just
    * stopped playing). */
   private restoreFrom(
     checkpoint: SaveData,
-    // sub is built from the *restored* stage's name, so it has to be a callback —
-    // this.stageDef still points at the old stage until setStage() below runs
-    opts: { keepBackpack: boolean; banner: string; subFor: (stageName: string) => string }
+    opts: { keepBackpack: boolean; banner: string; sub: string }
   ) {
     this.reset();
-    this.setStage(checkpoint.stage);
+    this.initWorld();
+    // resume right before the wave the checkpoint names — the normal break
+    // countdown then calls startWave(this.wave + 1) exactly like any other
+    // wave clear
+    this.wave = checkpoint.wave - 1;
     this.pl.level = checkpoint.level;
     this.pl.xp = checkpoint.xp;
     this.pl.xpNext = checkpoint.xpNext;
@@ -1790,48 +1763,48 @@ export class Engine {
     this.cam = clamp(this.pl.x - this.viewW / 2, 0, this.worldW - this.viewW);
     this.mode = "play";
     this.beginRest(2.4);
-    this.announce(opts.banner, opts.subFor(this.stageDef.name), 2.8);
+    this.announce(opts.banner, opts.sub, 2.8);
   }
 
-  private retryStage(checkpoint: SaveData) {
+  private retryFromCheckpoint(checkpoint: SaveData) {
     this.restoreFrom(checkpoint, {
       // dropping the carried backpack is the whole point of the death penalty
       keepBackpack: false,
       banner: "YOU DIED",
-      subFor: (stage) => `back at the safe house — ${stage}`,
+      sub: `back on your feet — wave ${checkpoint.wave} next`,
     });
   }
 
-  /** Stage a saved run would resume at, or null if there's nothing to continue.
+  /** Wave a saved run would resume at, or null if there's nothing to continue.
    * Drives the menu's CONTINUE button and its label. */
-  savedRunStage(): number | null {
-    return loadRun()?.stage ?? null;
+  savedRunWave(): number | null {
+    return loadRun()?.wave ?? null;
   }
 
-  /** Resume the checkpoint written by the last stage clear. Unlike dying, this
-   * keeps the backpack — the player didn't lose the run, they just stopped
-   * playing and came back. */
+  /** Resume the checkpoint written by the last boss-wave clear. Unlike dying,
+   * this keeps the backpack — the player didn't lose the run, they just
+   * stopped playing and came back. */
   continueRun(): boolean {
     const checkpoint = loadRun();
     if (!checkpoint) return false;
     this.sfx.ensure();
     this.restoreFrom(checkpoint, {
       keepBackpack: true,
-      banner: `STAGE ${checkpoint.stage}`,
-      subFor: (stage) => `picking up where you left off — ${stage}`,
+      banner: `WAVE ${checkpoint.wave}`,
+      sub: "picking up where you left off",
     });
     return true;
   }
 
-  private writeCheckpoint(nextStage: number) {
+  private writeCheckpoint(nextWave: number) {
     const data: SaveData = {
-      version: SAVE_VERSION, stage: nextStage,
+      version: SAVE_VERSION, wave: nextWave,
       level: this.pl.level, xp: this.pl.xp, xpNext: this.pl.xpNext,
       score: this.score, kills: this.kills, playTime: this.playTime,
       kind: this.kind, stacks: { ...this.stacks }, deposit: this.deposit, backpack: this.backpack,
     };
     saveRun(data);
-    this.profile.bestWave = Math.max(this.profile.bestWave, this.waveIndex);
+    this.profile.bestWave = Math.max(this.profile.bestWave, this.wave);
     saveProfile(this.profile);
   }
 
@@ -1903,10 +1876,9 @@ export class Engine {
     if (this.lvlPending > 0) {
       this.onEvent({ type: "levelup", choices: this.rollChoices() });
     } else {
-      // stay frozen if the stage-clear screen is still up
+      // stays frozen on its own if the boss-clear screen is still up —
+      // "bossclear" is only ever added/removed by completeBossWave()/continueAfterBoss()
       this.modals.delete("levelup");
-      if (this.stageIntermission) this.modals.add("stageclear");
-      else this.modals.delete("stageclear");
       this.onEvent({ type: "resume" });
     }
   }
@@ -2176,15 +2148,15 @@ export class Engine {
 
   /** Shared enemy weight table for the wave spawner. */
   // Continuous ramps instead of hard power gates — the old thresholds (power
-  // >=2/3/4) meant a player saw nothing but walkers for most of stage 1 and
-  // into stage 2, since power only reaches ~1.7 by the end of a 10-wave
-  // stage 1. Every type now has some presence from wave 1, growing with power.
+  // >=2/3/4) meant a player saw nothing but walkers for the first several
+  // waves, since power only climbs slowly. Every type now has some presence
+  // from wave 1, growing with power.
   private zombieWeights(power: number): Partial<Record<string, number>> {
     // Runners (speed 128) are the only fodder that can stay with a moving
-    // player at all — everything else is slower than a walk. On the boss
-    // stages the cap is raised so the crowd actually applies pressure instead
-    // of trailing behind in a line.
-    const boss = this.stageDef.bossId != null;
+    // player at all — everything else is slower than a walk. On a boss wave
+    // the cap is raised so the crowd actually applies pressure instead of
+    // trailing behind in a line.
+    const boss = isBossWave(this.wave);
     return {
       walker: 1,
       runner: Math.min(boss ? 1.2 : 0.6, 0.16 + power * 0.05),
@@ -2194,18 +2166,17 @@ export class Engine {
     };
   }
 
-  private buildWave(power: number, inStage: number): SpawnItem[] {
+  private buildWave(power: number, wave: number): SpawnItem[] {
     const items: SpawnItem[] = [];
-    const boss = this.stageDef.bossWaves.includes(inStage);
-    // inStage adds its own escalation on top of power, so each wave within a
-    // stage visibly spawns more than the last, not just a slow difficulty drift
-    // The fodder count used to drop to roughly half on a boss wave, on the
-    // reasoning that the boss itself carried the wave. In a lane that held;
-    // in open 2D it made the two boss waves the LIGHTEST in the stage, which
-    // is backwards for the one stage that's meant to be the wall. Boss waves
-    // now run at 0.85 of the ordinary curve — still a step down, since the
-    // boss is genuinely worth something, but no longer a discount.
-    const normal = Math.min(72, Math.round(6 + power * 3.0 + power * power * 0.12 + inStage * 1.6));
+    const boss = isBossWave(wave);
+    // position within the current 5-wave cycle adds its own escalation on top
+    // of power, so each wave visibly spawns more than the last building up to
+    // the boss, not just a slow difficulty drift.
+    const cyclePos = ((wave - 1) % 5) + 1;
+    // A boss wave's fodder runs at 0.85 of the ordinary curve — a step down,
+    // since the boss is genuinely worth something, but no longer a discount
+    // (a full-strength wave alongside a boss would just be unfair).
+    const normal = Math.min(72, Math.round(6 + power * 3.0 + power * power * 0.12 + cyclePos * 1.6));
     const count = boss ? Math.round(normal * 0.85) : normal;
     const weights = this.zombieWeights(power);
     for (let i = 0; i < count; i++) items.push({ type: rollEnemy(weights) as ZType });
@@ -2214,16 +2185,8 @@ export class Engine {
       const j = RI(0, i);
       [items[i], items[j]] = [items[j], items[i]];
     }
-    if (boss) {
-      const finalWave = inStage === this.stageDef.wavesPerStage;
-      if (finalWave) {
-        // final wave of the stage = a swarm finale, stacking brute-bosses among the fodder
-        const bosses = 1 + Math.min(2, Math.floor(this.stage / 2));
-        for (let i = 0; i < bosses; i++) items.unshift({ type: "brute", boss: true });
-      }
-      // the mid-stage boss wave instead gets the Juggernaut Alpha — spawned
-      // separately by startWave(), never through the fodder queue
-    }
+    // the boss itself is the real Juggernaut Alpha — spawned separately by
+    // startWave(), never through the fodder queue
     return items;
   }
 
@@ -2265,65 +2228,31 @@ export class Engine {
     this.breakMax = breakDur;
   }
 
-  /** Arena resupply: tops reserve up by a fraction of each weapon's capacity, capped at `cap` of it. */
-  private awardSupply(amount: number, cap: number) {
-    for (const id of WEAPON_IDS) {
-      const maxReserve = this.effWeapon(id).reserve;
-      if (maxReserve <= 0) continue; // unlimited/no reserve — nothing to top up
-      this.reserve[id] = Math.max(this.reserve[id], Math.min(maxReserve * cap, this.reserve[id] + maxReserve * amount));
-    }
-  }
 
-
-  private startWave(inStage: number) {
-    this.waveInStage = inStage;
-    this.waveIndex = cumulativeWaveIndex(this.stage, inStage);
-    this.power = difficultyFor(this.stage, inStage);
-    const finalWave = inStage === this.stageDef.wavesPerStage;
-    // stage 5 and 10 cap their final wave with a horde finale instead of a
-    // normal fixed-size batch — a sustained, continuously-refilled swarm
-    // with a boss-tier zombie, see HORDE_STAGES and the "active" phase update
-    const hordeFinale = this.stageDef.bossId == null && finalWave && HORDE_STAGES.includes(this.stage);
-    if (hordeFinale) {
-      this.queue = [];
-      this.waveTotal = 0;
-      this.hordeT = HORDE_DURATION;
-      this.hordeTotal = HORDE_DURATION;
-    } else {
-      this.queue = this.buildWave(this.power, inStage);
-      this.waveTotal = this.queue.length;
-      this.hordeT = 0;
-      this.hordeTotal = 0;
-    }
+  private startWave(wave: number) {
+    this.wave = wave;
+    this.power = difficultyFor(wave);
+    const boss = isBossWave(wave);
+    this.queue = this.buildWave(this.power, wave);
+    this.waveTotal = this.queue.length;
     this.phase = "active";
     this.spawnT = 0.6;
     this.boss = null;
     this.bossForceTarget = false;
-    // exploration stages carry no bossId, so they never spawn a boss even if
-    // their bossWaves array still marks a wave for the finale-swarm treatment
-    const bossWave = this.stageDef.bossId != null && this.stageDef.bossWaves.includes(inStage);
-    if (bossWave && !finalWave) this.spawnBoss();
-    if (hordeFinale) {
-      this.announce("THE HORDE IS HERE", `survive ${HORDE_DURATION}s — something big is coming`, 3);
-      this.spawnZombie({ type: "brute", boss: true });
-    } else if (bossWave) {
-      const def = BOSS_DEFS[this.stageDef.bossId!] ?? BOSS_DEFS.juggernaut;
-      this.announce(
-        finalWave ? "FINAL WAVE" : def.tellName,
-        finalWave ? "clear it to escape this place" : def.tellSub
-      );
+    if (boss) {
+      this.spawnBoss();
+      const def = BOSS_DEFS.juggernaut;
+      this.announce(def.tellName, def.tellSub);
     } else {
-      this.announce(`WAVE ${inStage} / ${this.stageDef.wavesPerStage}`, WAVE_SUBS[this.waveIndex % WAVE_SUBS.length]);
+      this.announce(`WAVE ${wave}`, WAVE_SUBS[wave % WAVE_SUBS.length]);
     }
     this.sfx.wave();
   }
 
-  /** Spawns the stage's Terminal Defense boss, per its `bossId` (defaults to the Juggernaut). */
+  /** Spawns the boss for a 5th-wave boss fight (always the Juggernaut — the
+   * only boss currently implemented). */
   private spawnBoss() {
-    // stub acts (II, III, V, VI) name a bossId whose BOSS_DEFS entry doesn't
-    // exist until that act's own phase lands — fall back to the Juggernaut
-    // rather than crash, same as an unset bossId
-    const def = BOSS_DEFS[this.stageDef.bossId ?? "juggernaut"] ?? BOSS_DEFS.juggernaut;
+    const def = BOSS_DEFS.juggernaut;
     const hpMul = 1 + (this.power - 1) * 0.22;
     const maxHp = Math.round(150 * hpMul * 4.4 * 1.3 * def.hpMul);
     // rises just off-screen on one side, on the same ground line as everything else
@@ -2354,59 +2283,41 @@ export class Engine {
     this.shake(9);
   }
 
-  /** Called after the stage's last wave is cleared — freezes the sim for the stage-clear screen.
-   * Used to require walking a gated corridor to a safe house first; that was a side-scroller-era
-   * mechanic (fixed "GROUND" y, gates you "clear" by walking into) that doesn't fit open 2D
-   * exploration, so clearing the last wave now finishes the stage directly. */
-  private completeStage() {
-    const cleared = this.stage;
-    this.stageIntermission = true;
-    this.modals.add("stageclear"); // freeze the sim behind the stage-clear screen
+  /** Called when a boss wave (every 5th) is cleared — this is the run's
+   * checkpoint, the same beat the old per-stage clear screen hit. Freezes the
+   * sim behind the BossClear/Loadout/SafeHouse screens. */
+  private completeBossWave() {
+    const cleared = this.wave;
+    this.modals.add("bossclear");
     this.phase = "break";
-    const bonus = 500 * cleared;
-    this.score += bonus;
+    this.score += 500 * (cleared / 5);
     this.pl.hp = this.st.maxHp;
-    // safe house resupply: reserve tops up to 50% (not full)
+    // resupply: reserve tops up to 50% (not full)
     for (const id of WEAPON_IDS) {
       if (this.reserve[id] >= 0) this.reserve[id] = Math.max(this.reserve[id], Math.round(this.effWeapon(id).reserve * 0.5));
     }
-    // a clear stage deserves a real supply drop — a physical crate spawned
-    // here would be left behind in a world about to be replaced, so grant it
-    // straight into the backpack instead (the Safe House screen right after
-    // is exactly where the player will see it)
-    this.grantLoot(HORDE_STAGES.includes(cleared) ? 3 : 2);
+    // a boss kill deserves a real supply drop — granted straight into the
+    // backpack, since the Safe House screen right after is exactly where the
+    // player will see it
+    this.grantLoot(3);
     this.writeCheckpoint(cleared + 1);
     this.sfx.levelup();
-    this.onEvent({
-      type: "stageclear", stage: cleared, next: cleared + 1,
-      stageName: this.stageDef.name, stageSub: this.stageDef.sub,
-      wavesPerStage: this.stageDef.wavesPerStage,
-    });
+    this.onEvent({ type: "bossclear", wave: cleared, next: cleared + 1 });
   }
 
-  /** Player confirmed the stage-clear screen. */
-  advanceStage() {
-    if (!this.stageIntermission) return;
-    this.setStage(this.stage + 1);
-    // walk out of the safe house back onto the left side of the new stage —
-    // also what keeps startTravel()'s safeHouseX comfortably in-bounds
-    this.pl.x = clamp(this.worldW * 0.12, 40, this.worldW - 40);
-    this.pl.y = GROUND;
-    this.pl.vx = 0;
-    this.cam = clamp(this.pl.x - this.viewW / 2, 0, this.worldW - this.viewW);
-    this.waveInStage = 0;
-    this.stageIntermission = false;
-    this.modals.delete("stageclear");
+  /** Player confirmed the BossClear/Loadout/SafeHouse screens. */
+  continueAfterBoss() {
+    if (!this.modals.has("bossclear")) return;
+    this.modals.delete("bossclear");
     this.bullets = [];
     this.eshots = [];
-    // full reload on every weapon when moving on — no carrying a half-empty mag into the next stage
+    // full reload on every weapon — no carrying a half-empty mag into the next cycle
     for (const id of WEAPON_IDS) this.ammo[id] = this.effWeapon(id).mag;
     this.reloading = false;
     this.reloadT = 0;
-    // the boss stage gets a real countdown to settle in; ordinary stages keep
-    // the brisk opener they already had
-    this.beginRest(this.stageDef.bossId != null ? 10 : 2.6);
-    this.announce(`STAGE ${this.stage} — ${this.stageDef.name}`, this.stageDef.sub, 2.8);
+    // a real countdown to settle in before the next 5-wave cycle starts
+    this.beginRest(10);
+    this.announce(`WAVE ${this.wave + 1}`, "the horde regroups", 2.8);
   }
 
   private mkZombie(type: ZType, x: number, y: number, hpMul: number, speedMul: number): Zombie {
@@ -2433,12 +2344,12 @@ export class Engine {
 
     // Spawns from either edge of the lane, just past the visible window — a
     // uniform coin flip on which side, biased toward the direction the player
-    // is actually moving on the boss stages so running one way isn't free
-    // forever. Clamped into the world so a spawn near the world's own edge
-    // still lands on solid ground instead of past it.
+    // is actually moving so running one way isn't free forever. Clamped into
+    // the world so a spawn near the world's own edge still lands on solid
+    // ground instead of past it.
     const p = this.pl;
     const movingDir = p.vx > 40 ? 1 : p.vx < -40 ? -1 : 0;
-    const ahead = this.stageDef.bossId != null && movingDir !== 0 && chance(0.65);
+    const ahead = movingDir !== 0 && chance(0.65);
     const side: 1 | -1 = ahead ? (movingDir as 1 | -1) : chance(0.5) ? 1 : -1;
     const x = clamp(
       side === 1 ? this.cam + this.viewW + R(20, 160) : this.cam - R(20, 160),
@@ -2497,16 +2408,10 @@ export class Engine {
       xp: Math.round(p.xp),
       xpNext: p.xpNext,
       level: p.level,
-      stage: this.stage,
-      stageName: this.stageDef.name,
-      waveInStage: this.waveInStage,
-      wavesPerStage: this.stageDef.wavesPerStage,
-      bossWaves: this.stageDef.bossWaves,
-      isBossWave: this.stageDef.bossWaves.includes(this.waveInStage),
+      wave: this.wave,
+      isBossWave: isBossWave(this.wave),
       waveTotal: this.waveTotal,
       remaining: this.queue.length + this.zombies.length,
-      hordeT: Math.max(0, this.hordeT),
-      hordeTotal: this.hordeTotal,
       phase: this.phase,
       score: this.score,
       kills: this.kills,
@@ -2958,7 +2863,7 @@ export class Engine {
     if (this.banners.length > 0) this.drawBanner(this.banners[0]);
 
     /* --- next wave countdown --- */
-    if (this.mode === "play" && !this.over && this.phase === "break" && !this.stageIntermission && this.waveIndex > 0) {
+    if (this.mode === "play" && !this.over && this.phase === "break" && !this.modalOpen && this.wave > 0) {
       c.textAlign = "center";
       c.font = '600 15px "Space Grotesk", sans-serif';
       c.fillStyle = "rgba(226,232,240,0.55)";
@@ -2974,7 +2879,7 @@ export class Engine {
       c.font = '600 11px monospace';
       c.fillStyle = "#4ade80";
       c.fillText(
-        `stage:${this.stage} phase:${this.phase} wave:${this.waveInStage}/${this.stageDef.wavesPerStage} power:${this.power.toFixed(1)} idx:${this.waveIndex} metaLv:${this.profile.metaLevel}`,
+        `wave:${this.wave} phase:${this.phase} power:${this.power.toFixed(1)} metaLv:${this.profile.metaLevel}`,
         8, H - 8
       );
       c.restore();
