@@ -34,4 +34,8 @@ export const UPGRADES: UpgradeDef[] = [
     id: "bombardment", name: "Bombardment", icon: "Bomb", max: 1, rarity: "epic",
     desc: () => `Instantly kill every zombie in the wave (bosses untouched) — used the moment you pick it`,
   },
+  {
+    id: "akimbo", name: "Akimbo", icon: "Copy", max: 1, rarity: "epic",
+    desc: () => `Dual-wield your pistol — fires a second round every shot, but pistol reload takes 45% longer`,
+  },
 ];

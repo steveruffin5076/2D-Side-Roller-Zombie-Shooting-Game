@@ -512,7 +512,7 @@ export class Engine {
       projectiles: 1, projSpread: 0, projJitter: 1,
       pierce: 0, crit: 0.05,
       speed: 275, maxHp: 100, magnet: 1, lifesteal: 0,
-      regen: 0, dashMax: 2.3,
+      regen: 0, dashMax: 2.3, reloadMul: 1,
     };
   }
 
@@ -1086,7 +1086,7 @@ export class Engine {
     this.reloading = true;
     // a tube gun clocks one shell at a time — same empty-to-full total, it just
     // no longer has to run to completion
-    this.reloadDur = w.tubeReload ? shellReloadTime(w) : w.reload;
+    this.reloadDur = (w.tubeReload ? shellReloadTime(w) : w.reload) * this.st.reloadMul;
     this.reloadT = this.reloadDur;
     this.sfx.reloadStart();
     if (!w.tubeReload) {
@@ -1970,7 +1970,10 @@ export class Engine {
     const w = WDEF[this.kind] ?? WDEF.pistol;
     // multishot adds pellets to shotgun, extra rounds to everything else
     const extra = s("multi");
-    const projectiles = w.projectiles + extra * (w.cls === "shotgun" ? 2 : 1);
+    // Akimbo: a second pistol firing alongside the first — doubles the
+    // pistol's base projectile count, but only while a pistol is equipped
+    const akimbo = w.cls === "pistol" && s("akimbo") > 0;
+    const projectiles = w.projectiles + extra * (w.cls === "shotgun" ? 2 : 1) + (akimbo ? w.projectiles : 0);
     const spread = w.projectiles > 1 ? w.spread : 0.07;
     this.st = {
       damage: w.damage * (1 + 0.3 * s("dmg")),
@@ -1989,6 +1992,8 @@ export class Engine {
       lifesteal: 0.03 * s("vamp"),
       regen: 0.9 * s("regen"),
       dashMax: 2.3 * Math.pow(0.68, s("dash")),
+      // a second pistol means two mags to reload, one-handed each — slower overall
+      reloadMul: akimbo ? 1.45 : 1,
     };
   }
 

@@ -1,12 +1,12 @@
 import type { Rarity } from "../game/types";
 import {
   Crosshair, Gauge, Layers, ChevronsRight, Target, Wind, HeartPulse, Footprints,
-  Droplets, Magnet, Activity, Ghost, Zap, Flame, Shield, Bomb, type LucideIcon,
+  Droplets, Magnet, Activity, Ghost, Zap, Flame, Shield, Bomb, Copy, type LucideIcon,
 } from "lucide-react";
 
 export const ICONS: Record<string, LucideIcon> = {
   Crosshair, Gauge, Layers, ChevronsRight, Target, Wind, HeartPulse,
-  Footprints, Droplets, Magnet, Activity, Ghost, Zap, Flame, Shield, Bomb,
+  Footprints, Droplets, Magnet, Activity, Ghost, Zap, Flame, Shield, Bomb, Copy,
 };
 
 export const RARITY_STYLE: Record<Rarity, { border: string; glow: string; tag: string; label: string }> = {
