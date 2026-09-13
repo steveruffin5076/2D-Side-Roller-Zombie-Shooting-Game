@@ -1,11 +1,12 @@
 import { useEffect } from "react";
-import { ArrowLeft, ArrowRight, Zap, Hand, Bot, Crosshair } from "lucide-react";
+import { ArrowLeft, ArrowRight, ArrowUp, Zap, Hand, Bot, Crosshair } from "lucide-react";
 
 interface Props {
   /** presses/releases a virtual keyboard key — same effect as the real key */
   onPressKey: (code: string) => void;
   onReleaseKey: (code: string) => void;
   onDash: () => void;
+  onJump: () => void;
   onFireStart: () => void;
   onFireEnd: () => void;
   /** held-E equivalent: crate open / boss force-target */
@@ -57,6 +58,7 @@ export default function TouchControls({
   onPressKey,
   onReleaseKey,
   onDash,
+  onJump,
   onFireStart,
   onFireEnd,
   showInteract,
@@ -101,10 +103,12 @@ export default function TouchControls({
         </div>
       )}
 
-      {/* right: dash + fire-mode sit above Fire, clear of the thumb firing.
-       * Hud.tsx hides its own fire-mode/dash panels on touch (`touch` prop),
-       * so this is the only copy of that UI on a touch device. */}
-      <div className="pointer-events-auto absolute bottom-32 right-10 flex items-center gap-4">
+      {/* right: dash + fire-mode sit in a utility row well clear of the
+       * Fire/Jump row below (96px tall, bottom-10) — a fixed gap so they
+       * never visually overlap regardless of screen size. Hud.tsx hides
+       * its own fire-mode/dash panels on touch (`touch` prop), so this is
+       * the only copy of that UI on a touch device. */}
+      <div className="pointer-events-auto absolute bottom-40 right-10 flex items-center gap-4">
         <button
           className={`${btnClass} h-16 w-16 ${dashReady ? "border-cyan-300/60 text-cyan-200 shadow-[0_0_14px_rgba(103,232,249,0.4)]" : ""}`}
           onPointerDown={(e) => {
@@ -131,10 +135,21 @@ export default function TouchControls({
         </button>
       </div>
 
-      {/* right: fire — held for continuous manual fire; auto-fire mode shoots
-       * on its own once a target is in the lane, so this just doubles as a
-       * "look busy" button then, but still works. */}
-      <div className="pointer-events-auto absolute bottom-10 right-10">
+      {/* right: Jump + Fire, side by side so both thumbs' resting spot stays
+       * put — Jump is a tap, Fire is held for continuous manual fire (auto
+       * mode shoots on its own once a target is in the lane, so Fire just
+       * doubles as a "look busy" button then, but still works). */}
+      <div className="pointer-events-auto absolute bottom-10 right-10 flex items-center gap-4">
+        <button
+          className={`${btnClass} h-24 w-24 border-cyan-400/30 text-cyan-200`}
+          onPointerDown={(e) => {
+            e.preventDefault();
+            onJump();
+          }}
+          aria-label="Jump"
+        >
+          <ArrowUp className="h-10 w-10" />
+        </button>
         <button
           className={`${btnClass} h-24 w-24 border-amber-400/30 text-amber-200`}
           onPointerDown={(e) => {

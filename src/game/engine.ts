@@ -35,11 +35,17 @@ import type { EngineEvent, GameStats, HudState, InventorySnapshot, ProfileSnapsh
 const W = 1280;
 const H = 720;
 /** The one ground line every character stands on — a side view, not a top-down
- * field. Player, zombies and the boss all keep `y === GROUND`; only `x` moves. */
+ * field. Zombies and the boss keep `y === GROUND` always; only the player can
+ * leave it, briefly, by jumping. */
 const GROUND = 584;
 /** Chest/gun height above GROUND — everything that aims or fires does so from
  * here, not from the feet the position actually tracks. */
 const CHEST_H = 30;
+/** Jump physics — a single hop, no double-jump. Tuned so the arc clears a
+ * zombie's head (~50 units) with room to spare, and lands in well under a
+ * second so it stays a dodge, not a float. */
+const GRAV = 2400;
+const JUMP_SPEED = 820;
 /** One continuous world — no more stages/acts to switch between, so this is
  * the whole map, wide enough that the wreck set-piece and decor have room. */
 const WORLD_W = 2880;
@@ -489,13 +495,14 @@ export class Engine {
 
   private freshPlayer() {
     return {
-      x: this.worldW / 2, y: GROUND, vx: 0,
+      x: this.worldW / 2, y: GROUND, vx: 0, vy: 0,
       hp: 100, level: 1, xp: 0, xpNext: 12,
       face: 1 as 1 | -1, aim: 0, cd: 0, ifr: 0, flash: 0, hurtT: 0,
       dashT: 0, dashCd: 0, dashDir: 1 as 1 | -1,
       walk: 0,
       /** blocks fire() while > 0 — consumable "use" animation lockout */
       useT: 0,
+      grounded: true, jumps: 0,
     };
   }
 
@@ -662,6 +669,7 @@ export class Engine {
     }
     if (this.paused || this.modalOpen) return;
     if (c === "ShiftLeft" || c === "ShiftRight") this.dash();
+    if (c === "Space" || c === "ArrowUp" || c === "KeyW") this.jump();
     // ENTER skips the rest of a countdown (the boss stage's 10s opener)
     if (c === "Enter" && this.phase === "break") this.breakT = 0;
     if (c.startsWith("Digit")) {
@@ -737,6 +745,13 @@ export class Engine {
     this.dash();
   }
 
+  /** Triggers a jump, respecting the same game-state guards as the keyboard handler. */
+  triggerJump() {
+    if (this.mode !== "play" || this.over || this.paused || this.modalOpen) return;
+    this.sfx.ensure();
+    this.jump();
+  }
+
   /** KeyE (or its touch interact-button equivalent) while a boss is alive forces
    * the boss to win the lane lock over a zombie — see acquireLaneTarget(). */
   toggleBossForceTarget() {
@@ -771,6 +786,20 @@ export class Engine {
     const mov = this.inputDir();
     p.dashDir = mov !== 0 ? mov : this.facing;
     this.sfx.dash();
+  }
+
+  private jump() {
+    const p = this.pl;
+    if (p.jumps >= 1) return;
+    p.vy = -JUMP_SPEED;
+    p.grounded = false;
+    p.jumps++;
+    this.sfx.jump();
+    for (let i = 0; i < 5; i++)
+      this.particles.push({
+        x: p.x + R(-8, 8), y: GROUND + 2, vx: R(-50, 50), vy: R(-40, -10),
+        life: 0.35, max: 0.35, size: R(2, 4), color: "#3a4552", grav: 300, add: false,
+      });
   }
 
   /* ---------------- attract (menu bg) ---------------- */
@@ -834,9 +863,18 @@ export class Engine {
       p.vx = lerp(p.vx, mov * speed, Math.min(1, 14 * dt));
     }
 
-    // Update position — y is fixed at GROUND, nothing moves vertically
+    // Update position — x is free; y only ever moves while jumping
     p.x = clamp(p.x + p.vx * dt, 26, this.worldW - 26);
     this.resolvePlayerObstacles();
+
+    p.vy += GRAV * dt;
+    p.y += p.vy * dt;
+    if (p.y >= GROUND) {
+      p.y = GROUND;
+      p.vy = 0;
+      p.grounded = true;
+      p.jumps = 0;
+    }
 
     // Animation: walk cycle based on speed
     const vel = Math.abs(p.vx);
@@ -1234,8 +1272,10 @@ export class Engine {
       z.x = clamp(z.x + z.vx * dt, 10, this.worldW - 10);
       z.y = GROUND;
 
-      // contact damage
-      if (Math.abs(dx) < z.r + 15 && z.atk <= 0) {
+      // contact damage — a jump that clears the zombie's head (dy very
+      // negative, since zombies stand at GROUND) dodges the hit, same as
+      // it already does against boss attacks
+      if (Math.abs(dx) < z.r + 15 && dy > -60 && z.atk <= 0) {
         z.atk = z.type === "brute" ? 1.15 : 0.8;
         this.hurtPlayer(z.dmg * R(0.9, 1.1), dir * (z.type === "brute" ? 300 : 150));
       }
@@ -3307,10 +3347,14 @@ export class Engine {
     const py = p.y + camY;
     const chestY = py - CHEST_H;
 
-    // soft contact shadow, flat on the ground under the feet
-    c.fillStyle = "rgba(0,0,0,0.45)";
+    // soft contact shadow, pinned to the ground (not the jumping body) —
+    // shrinks with height so it still reads as "directly below you"
+    const groundPy = GROUND + camY;
+    const airT = clamp((groundPy - py) / 140, 0, 1);
+    const shadowScale = 1 - airT * 0.5;
+    c.fillStyle = `rgba(0,0,0,${0.45 * (1 - airT * 0.6)})`;
     c.beginPath();
-    c.ellipse(px, py + 2, SOLDIER_HALF * 0.55, SOLDIER_HALF * 0.16, 0, 0, TAU);
+    c.ellipse(px, groundPy + 2, SOLDIER_HALF * 0.55 * shadowScale, SOLDIER_HALF * 0.16 * shadowScale, 0, 0, TAU);
     c.fill();
 
     c.save();
@@ -3320,7 +3364,7 @@ export class Engine {
     // Body faces the locked lane; the gun tilts with the aim angle — the two
     // usually agree, but the gun alone tips up at a locked target's head.
     const vel = Math.abs(p.vx);
-    const run = vel > 26;
+    const run = vel > 26 && p.grounded;
     const bodyDir = dirFor(this.facing === 1 ? 0 : Math.PI, DIRS);
     const frame = run ? Math.floor(p.walk / (Math.PI / 2)) % FRAMES : 0;
 

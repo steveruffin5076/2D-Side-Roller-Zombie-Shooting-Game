@@ -236,6 +236,7 @@ export default function App() {
   const pressKey = useCallback((code: string) => engineRef.current?.pressKey(code), []);
   const releaseKey = useCallback((code: string) => engineRef.current?.releaseKey(code), []);
   const triggerDash = useCallback(() => engineRef.current?.triggerDash(), []);
+  const triggerJump = useCallback(() => engineRef.current?.triggerJump(), []);
   const fireStart = useCallback(() => engineRef.current?.setFiring(true), []);
   const fireEnd = useCallback(() => engineRef.current?.setFiring(false), []);
   const interactStart = useCallback(() => {
@@ -316,6 +317,7 @@ export default function App() {
             onPressKey={pressKey}
             onReleaseKey={releaseKey}
             onDash={triggerDash}
+            onJump={triggerJump}
             onFireStart={fireStart}
             onFireEnd={fireEnd}
             showInteract={!!hud?.crateNear}
