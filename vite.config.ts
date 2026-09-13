@@ -10,7 +10,7 @@ const __dirname = path.dirname(__filename);
 
 // https://vite.dev/config/
 export default defineConfig({
-  base: "/zombie-survival-shooter-game/",
+  base: "/2D-Side-Roller-Zombie-Shooting-Game/",
   plugins: [react(), tailwindcss(), viteSingleFile()],
   resolve: {
     alias: {
