@@ -1,17 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Zap, Hand, Bot } from "lucide-react";
+import { useEffect } from "react";
+import { ArrowLeft, ArrowRight, Zap, Hand, Bot, Crosshair } from "lucide-react";
 
 interface Props {
-  /** left stick deflection, each axis -1..1; (0,0) on release */
-  onMove: (x: number, y: number) => void;
-  /** right stick deflection, each axis -1..1; (0,0) on release */
-  onAim: (x: number, y: number) => void;
+  /** presses/releases a virtual keyboard key — same effect as the real key */
+  onPressKey: (code: string) => void;
+  onReleaseKey: (code: string) => void;
   onDash: () => void;
-  /** tap-to-place, used for arena deployables during prep */
-  onTap: (clientX: number, clientY: number) => void;
   onFireStart: () => void;
   onFireEnd: () => void;
-  /** held-E equivalent: crate open / gate bypass / boss force-target */
+  /** held-E equivalent: crate open / boss force-target */
   showInteract: boolean;
   onInteractStart: () => void;
   onInteractEnd: () => void;
@@ -25,103 +22,41 @@ interface Props {
 }
 
 const btnClass =
-  "flex h-20 w-20 items-center justify-center rounded-full border border-white/10 bg-black/50 text-white/80 backdrop-blur-sm active:bg-white/20 active:text-white touch-none select-none";
+  "flex items-center justify-center rounded-full border border-white/10 bg-black/50 text-white/80 backdrop-blur-sm active:bg-white/20 active:text-white touch-none select-none";
 
-/** stick travel radius, in the same 1280x720 space the rest of the UI layer is
- * authored in (App.tsx scales the whole layer to fit the box) */
-const STICK_R = 92;
-/** ignore the first slice of travel so resting a thumb doesn't twitch the aim */
-const DEADZONE = 0.15;
-
-/** One analog stick. Reports deflection as a -1..1 vector per axis, measured
- * against its own on-screen radius so it works at any UI scale. */
-function Stick({
-  side, label, tint, onVector,
+/** One directional hold-button: presses a virtual key on pointerdown, releases
+ * it on pointerup/cancel/leave — a plain D-pad half, not an analog stick. */
+function DirButton({
+  code, label, icon, onPressKey, onReleaseKey,
 }: {
-  side: "left" | "right";
+  code: string;
   label: string;
-  tint: string;
-  onVector: (x: number, y: number) => void;
+  icon: React.ReactNode;
+  onPressKey: (code: string) => void;
+  onReleaseKey: (code: string) => void;
 }) {
-  const [knob, setKnob] = useState({ x: 0, y: 0 });
-  const pointerId = useRef<number | null>(null);
-  const origin = useRef({ x: 0, y: 0 });
-  // read through a ref so the release-on-unmount effect below can hold no deps:
-  // the HUD re-renders every 66ms, and an onVector in the dep array would make
-  // that effect tear down and re-run — zeroing the stick mid-drag, every tick
-  const onVectorRef = useRef(onVector);
-  onVectorRef.current = onVector;
-
-  const drive = (clientX: number, clientY: number, scale: number) => {
-    const dx = clientX - origin.current.x;
-    const dy = clientY - origin.current.y;
-    const r = STICK_R * scale;
-    const dist = Math.hypot(dx, dy);
-    const clamped = dist > r ? r / dist : 1;
-    setKnob({ x: (dx * clamped) / scale, y: (dy * clamped) / scale });
-    const nx = dx / r;
-    const ny = dy / r;
-    if (Math.hypot(nx, ny) < DEADZONE) {
-      onVector(0, 0);
-      return;
-    }
-    onVector(Math.max(-1, Math.min(1, nx)), Math.max(-1, Math.min(1, ny)));
-  };
-
-  const release = () => {
-    pointerId.current = null;
-    setKnob({ x: 0, y: 0 });
-    onVector(0, 0);
-  };
-
-  // a stick unmounted mid-drag (level-up, pause) never sees its pointerup
-  useEffect(() => () => onVectorRef.current(0, 0), []);
-
+  useEffect(() => () => onReleaseKey(code), [code, onReleaseKey]);
   return (
-    <div
-      className="pointer-events-auto absolute touch-none select-none"
-      style={{
-        [side]: 40, bottom: 40,
-        width: STICK_R * 2, height: STICK_R * 2,
-      }}
+    <button
+      className={`${btnClass} h-20 w-20`}
       onPointerDown={(e) => {
         e.preventDefault();
-        e.stopPropagation();
-        const el = e.currentTarget;
-        el.setPointerCapture(e.pointerId);
-        pointerId.current = e.pointerId;
-        const box = el.getBoundingClientRect();
-        origin.current = { x: box.left + box.width / 2, y: box.top + box.height / 2 };
-        // the UI layer is uniformly scaled, so one measured axis gives the factor
-        drive(e.clientX, e.clientY, box.width / (STICK_R * 2));
+        onPressKey(code);
       }}
-      onPointerMove={(e) => {
-        if (pointerId.current !== e.pointerId) return;
-        const box = e.currentTarget.getBoundingClientRect();
-        drive(e.clientX, e.clientY, box.width / (STICK_R * 2));
-      }}
-      onPointerUp={release}
-      onPointerCancel={release}
+      onPointerUp={() => onReleaseKey(code)}
+      onPointerCancel={() => onReleaseKey(code)}
+      onPointerLeave={() => onReleaseKey(code)}
       aria-label={label}
     >
-      <div className={`absolute inset-0 rounded-full border bg-black/35 backdrop-blur-sm ${tint}`} />
-      <div
-        className="absolute rounded-full border border-white/25 bg-white/20"
-        style={{
-          width: STICK_R, height: STICK_R,
-          left: STICK_R / 2, top: STICK_R / 2,
-          transform: `translate(${knob.x}px, ${knob.y}px)`,
-        }}
-      />
-    </div>
+      {icon}
+    </button>
   );
 }
 
 export default function TouchControls({
-  onMove,
-  onAim,
+  onPressKey,
+  onReleaseKey,
   onDash,
-  onTap,
   onFireStart,
   onFireEnd,
   showInteract,
@@ -131,8 +66,6 @@ export default function TouchControls({
   autoFire,
   onToggleFireMode,
 }: Props) {
-  const firing = useRef(false);
-
   useEffect(() => {
     return () => {
       onFireEnd();
@@ -140,41 +73,20 @@ export default function TouchControls({
     };
   }, [onFireEnd, onInteractEnd]);
 
-  /** Twin-stick: the right stick points the flashlight cone AND pulls the
-   * trigger while it's deflected, so aiming and firing are one thumb. In
-   * auto-fire mode the engine still gates on a target being in the cone;
-   * this just decides where the cone points. */
-  const aimAndFire = useCallback((x: number, y: number) => {
-    onAim(x, y);
-    const live = x !== 0 || y !== 0;
-    if (live === firing.current) return;
-    firing.current = live;
-    if (live) onFireStart();
-    else onFireEnd();
-  }, [onAim, onFireStart, onFireEnd]);
-
   return (
     <div className="pointer-events-none absolute inset-0 z-30">
-      {/* tap surface — only used to place arena deployables during prep now
-       * that the right stick owns aiming. Sits under everything below (later
-       * in DOM order = on top for hit-testing) so it never steals their taps. */}
-      <div
-        className="pointer-events-auto absolute inset-0 touch-none"
-        onPointerDown={(e) => onTap(e.clientX, e.clientY)}
-      />
+      {/* left: move — two hold-buttons instead of a joystick, straight left or right */}
+      <div className="pointer-events-auto absolute bottom-10 left-10 flex items-center gap-3">
+        <DirButton code="ArrowLeft" label="Move left" icon={<ArrowLeft className="h-9 w-9" />} onPressKey={onPressKey} onReleaseKey={onReleaseKey} />
+        <DirButton code="ArrowRight" label="Move right" icon={<ArrowRight className="h-9 w-9" />} onPressKey={onPressKey} onReleaseKey={onReleaseKey} />
+      </div>
 
-      {/* left: move. Full 360° — this is a top-down game, and the old
-       * left/right button pair couldn't go up or down at all. */}
-      <Stick side="left" label="Move" tint="border-white/15" onVector={onMove} />
-
-      {/* right: aim + fire */}
-      <Stick side="right" label="Aim and fire" tint="border-amber-400/25" onVector={aimAndFire} />
-
-      {/* interact — only shown near a crate/gate, mirrors held KeyE */}
+      {/* interact — only shown near a crate/gate, mirrors held KeyE. Centered
+       * above the move/fire buttons so it never sits under either thumb. */}
       {showInteract && (
         <div className="pointer-events-auto absolute bottom-56 left-1/2 -translate-x-1/2">
           <button
-            className={btnClass}
+            className={`${btnClass} h-20 w-20`}
             onPointerDown={(e) => {
               e.preventDefault();
               onInteractStart();
@@ -189,25 +101,22 @@ export default function TouchControls({
         </div>
       )}
 
-      {/* dash + fire-mode sit above the right stick, clear of both thumbs.
+      {/* right: dash + fire-mode sit above Fire, clear of the thumb firing.
        * Hud.tsx hides its own fire-mode/dash panels on touch (`touch` prop),
-       * so this is the only copy of that UI on a touch device.
-       * Side by side rather than stacked: at a 44px real-pixel minimum these grow
-       * in layer units as the screen shrinks, and on a 320px-tall phone a column
-       * here plus the HUD's own column above leaves no gap between them. */}
-      <div className="pointer-events-auto absolute bottom-60 right-6 flex items-center gap-4">
+       * so this is the only copy of that UI on a touch device. */}
+      <div className="pointer-events-auto absolute bottom-32 right-10 flex items-center gap-4">
         <button
-          className={`${btnClass} ${dashReady ? "border-cyan-300/60 text-cyan-200 shadow-[0_0_14px_rgba(103,232,249,0.4)]" : ""}`}
+          className={`${btnClass} h-16 w-16 ${dashReady ? "border-cyan-300/60 text-cyan-200 shadow-[0_0_14px_rgba(103,232,249,0.4)]" : ""}`}
           onPointerDown={(e) => {
             e.preventDefault();
             onDash();
           }}
           aria-label="Dash"
         >
-          <Zap className="h-9 w-9" />
+          <Zap className="h-7 w-7" />
         </button>
         <button
-          className={`flex h-16 w-16 items-center justify-center rounded-full border backdrop-blur-sm touch-none select-none transition-colors ${
+          className={`flex h-14 w-14 items-center justify-center rounded-full border backdrop-blur-sm touch-none select-none transition-colors ${
             autoFire
               ? "border-emerald-400/50 bg-emerald-500/15 text-emerald-200"
               : "border-amber-400/50 bg-amber-500/15 text-amber-200"
@@ -218,7 +127,26 @@ export default function TouchControls({
           }}
           aria-label={autoFire ? "Switch to manual fire" : "Switch to auto fire"}
         >
-          {autoFire ? <Bot className="h-7 w-7" /> : <Hand className="h-7 w-7" />}
+          {autoFire ? <Bot className="h-6 w-6" /> : <Hand className="h-6 w-6" />}
+        </button>
+      </div>
+
+      {/* right: fire — held for continuous manual fire; auto-fire mode shoots
+       * on its own once a target is in the lane, so this just doubles as a
+       * "look busy" button then, but still works. */}
+      <div className="pointer-events-auto absolute bottom-10 right-10">
+        <button
+          className={`${btnClass} h-24 w-24 border-amber-400/30 text-amber-200`}
+          onPointerDown={(e) => {
+            e.preventDefault();
+            onFireStart();
+          }}
+          onPointerUp={onFireEnd}
+          onPointerCancel={onFireEnd}
+          onPointerLeave={onFireEnd}
+          aria-label="Fire"
+        >
+          <Crosshair className="h-10 w-10" />
         </button>
       </div>
     </div>

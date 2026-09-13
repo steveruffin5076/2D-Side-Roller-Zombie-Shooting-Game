@@ -34,11 +34,12 @@ import type { EngineEvent, GameStats, HudState, InventorySnapshot, ProfileSnapsh
 
 const W = 1280;
 const H = 720;
-/** Menu attract-mode ground line and the screen-space fog band. Gameplay is
- * fully 2D and has no ground line. */
+/** The one ground line every character stands on — a side view, not a top-down
+ * field. Player, zombies and the boss all keep `y === GROUND`; only `x` moves. */
 const GROUND = 584;
-// Top-down camera: world bounds for player movement
-const WORLD_H = 1440; // vertical play area height
+/** Chest/gun height above GROUND — everything that aims or fires does so from
+ * here, not from the feet the position actually tracks. */
+const CHEST_H = 30;
 /** Theme order the per-theme stage wrecks are authored in (see props.ts). */
 const WRECK_THEMES = ["cemetery", "suburbs", "highway", "arena"];
 const TAU = Math.PI * 2;
@@ -88,11 +89,6 @@ const SCREAMER_WEIGHT = 0.18;
  * real set piece rather than just another wave-sized batch. */
 const HORDE_STAGES = [5, 10];
 const HORDE_DURATION = 60;
-
-/** Half-angle of the flashlight's fully-lit cone (see render()'s darkenOutside
- * calls) — also the field auto-fire scans for a target, so "in the flashlight"
- * means the same thing visually and mechanically. */
-const FLASHLIGHT_HALF_ANGLE = 0.55;
 
 /** How long the Terminal Defense boss spends rising out of its grave —
  * invulnerable and inert — before the fight actually starts. */
@@ -181,7 +177,7 @@ interface Banner { text: string; sub: string; t: number; dur: number }
 interface Decor { x: number; y: number; kind: number; v: number; ph: number }
 /** Solid-collision radius per decor kind (world units, scaled by the decor's own `s`).
  * 0 means walk-through — just the lamp post's thin light pole. */
-const DECOR_SOLID_R = [11, 13, 16, 0, 18, 14, 16, 34];
+const DECOR_SOLID_R = [8, 10, 7, 0, 15, 8, 11, 34];
 // These are no longer scaled per instance. Variety is three authored sprite
 // variants per kind instead of a 0.7-1.25x scale, so every prop of a kind now
 // has the hitbox its art actually draws — the Phase 1 art/hitbox fix again.
@@ -218,23 +214,16 @@ export class Engine {
   }
 
   private keys = new Set<string>();
-  private mouse = { x: W / 2, y: 300, down: false };
-  /** left touch joystick deflection, -1..1 per axis — see setMoveVector() */
-  private stick = { x: 0, y: 0 };
+  /** true while the fire button/click is held — manual-trigger mode only */
+  private mouse = { down: false };
   /** world magnification from Settings, 1 = off */
   private zoomPref = 1;
-  /** right touch joystick deflection, -1..1 per axis — see setAimVector() */
-  private aimStick = { x: 0, y: 0 };
-  /** Angle the aim stick was last pointed at, kept after the thumb lifts so the
-   * aim holds instead of snapping somewhere else. null = stick never used. */
-  private aimHold: number | null = null;
-  /** True once a real mouse has moved. Taps also write mouse.x/y, so aiming
-   * can't just key off that — this tells a moved cursor apart from a tap. */
-  private pointerAims = false;
+  /** blocks fire() briefly after a lane flip; scaled by the weapon's pivotMul */
+  private pivotT = 0;
 
-  // world state
+  // world state — a side view: only `cam` (world-x of the visible window's
+  // left edge) ever pans. Every character's y is the fixed GROUND line.
   private cam = 0;
-  private camY = 0; // top-down camera Y position
   private shakeMag = 0;
   private shakeX = 0;
   private shakeY = 0;
@@ -378,7 +367,6 @@ export class Engine {
     window.removeEventListener("keyup", this.onKeyUp);
     window.removeEventListener("blur", this.onBlur);
     document.removeEventListener("visibilitychange", this.onVis);
-    this.canvas.removeEventListener("mousemove", this.onMouseMove);
     this.canvas.removeEventListener("mousedown", this.onMouseDown);
     window.removeEventListener("mouseup", this.onMouseUp);
     this.canvas.removeEventListener("contextmenu", this.onCtx);
@@ -509,10 +497,10 @@ export class Engine {
 
   private freshPlayer() {
     return {
-      x: this.worldW / 2, y: WORLD_H / 2, vx: 0, vy: 0,
+      x: this.worldW / 2, y: GROUND, vx: 0,
       hp: 100, level: 1, xp: 0, xpNext: 12,
-      face: 1, aim: 0, cd: 0, ifr: 0, flash: 0, hurtT: 0,
-      dashT: 0, dashCd: 0, dashDir: 1,
+      face: 1 as 1 | -1, aim: 0, cd: 0, ifr: 0, flash: 0, hurtT: 0,
+      dashT: 0, dashCd: 0, dashDir: 1 as 1 | -1,
       walk: 0,
       /** blocks fire() while > 0 — consumable "use" animation lockout */
       useT: 0,
@@ -591,20 +579,10 @@ export class Engine {
     this.paused = false;
     this.modals.clear();
     this.cam = clamp(this.pl.x - this.viewW / 2, 0, this.worldW - this.viewW);
-    this.mouse.x = W / 2;
-    this.mouse.y = 280;
     // Clear held input so a key/fire state stuck by a touch gesture that never
     // saw its pointerup can't be inherited by a fresh run (death -> Restart).
     this.keys.clear();
-    this.stick.x = 0;
-    this.stick.y = 0;
-    this.aimStick.x = 0;
-    this.aimStick.y = 0;
-    // a fresh run faces the default direction rather than inheriting the angle
-    // the last one was left holding. onBlur deliberately doesn't do this — a
-    // backgrounded tab shouldn't lose your aim.
-    this.aimHold = null;
-    this.pointerAims = false;
+    this.pivotT = 0;
     this.mouse.down = false;
   }
 
@@ -623,54 +601,46 @@ export class Engine {
     this.decor = [];
     this.tufts = [];
     this.theme = theme;
-    // decor scattered across the full top-down play area (x AND y) — kind
-    // weights vary per theme. Density is area-based so wide/tall stages
-    // don't feel sparser or denser than the tuned reference stage.
+    // decor scattered along the ground line (x only — every prop stands at
+    // GROUND, same as the player and every zombie). Density is per world
+    // width so a wide stage doesn't feel sparser than the tuned reference.
     const weights = theme.decorWeights;
     const wTotal = weights.reduce((a, b) => a + b, 0) || 1;
-    const area = worldW * WORLD_H;
-    const decorCount = Math.round(area / 42000);
-    // keep a clear patch around the stage's own spawn point (worldW/2, WORLD_H/2)
-    // so a solid obstacle can never spawn on top of the player at stage start
-    const spawnX = worldW / 2, spawnY = WORLD_H / 2;
+    const decorCount = Math.round(worldW / 210);
+    // keep a clear patch around the stage's own spawn point (worldW/2) so a
+    // solid obstacle can never spawn on top of the player at stage start
+    const spawnX = worldW / 2;
     for (let i = 0; i < decorCount; i++) {
       let roll = Math.random() * wTotal;
       let kind = 0;
       for (let k = 0; k < weights.length; k++) {
         if ((roll -= weights[k]) < 0) { kind = k; break; }
       }
-      let x = 0, y = 0;
+      let x = 0;
       for (let tries = 0; tries < 5; tries++) {
         x = R(40, worldW - 40);
-        y = R(40, WORLD_H - 40);
-        if (Math.hypot(x - spawnX, y - spawnY) > 120) break;
+        if (Math.abs(x - spawnX) > 120) break;
       }
-      this.decor.push({ x, y, kind, v: Math.floor(R(0, PROP_VARIANTS)), ph: R(0, TAU) });
+      this.decor.push({ x, y: GROUND, kind, v: Math.floor(R(0, PROP_VARIANTS)), ph: R(0, TAU) });
     }
 
-    // One set-piece wreck per stage — a landmark to navigate by, in the spirit
-    // of the crashed plane in the reference art. Placed from the stage number
-    // rather than randomly, so a given stage always reads the same, and pushed
-    // clear of the spawn point: it is the only prop big enough that landing on
-    // the player would matter. At 112x80 against a 2880x1440 world it is a
-    // feature to walk around, not a wall that funnels the fight.
+    // One set-piece wreck per stage — a landmark to navigate by. Placed from
+    // the stage number rather than randomly, so a given stage always reads
+    // the same, and pushed clear of the spawn point.
     const themeIdx = WRECK_THEMES.indexOf(theme.id);
-    const wx = worldW * (0.22 + ((this.stage * 7) % 5) * 0.14);
-    let wy = WORLD_H * (0.2 + ((this.stage * 3) % 4) * 0.2);
-    if (Math.hypot(wx - spawnX, wy - spawnY) < 260) {
-      wy += wy < spawnY ? -WORLD_H * 0.18 : WORLD_H * 0.18;
-    }
-    wy = clamp(wy, 90, WORLD_H - 90);
-    this.decor.push({ x: wx, y: wy, kind: WRECK_KIND, v: Math.max(0, themeIdx), ph: 0 });
-    // ground tufts, scattered the same way (world coords, no parallax)
-    const tuftCount = Math.round(area / 9000);
+    let wx = worldW * (0.22 + ((this.stage * 7) % 5) * 0.14);
+    if (Math.abs(wx - spawnX) < 260) wx += wx < spawnX ? -worldW * 0.18 : worldW * 0.18;
+    wx = clamp(wx, 90, worldW - 90);
+    this.decor.push({ x: wx, y: GROUND, kind: WRECK_KIND, v: Math.max(0, themeIdx), ph: 0 });
+    // ground tufts, scattered the same way along x
+    const tuftCount = Math.round(worldW / 55);
     for (let i = 0; i < tuftCount; i++) {
-      this.tufts.push({ x: R(0, worldW), y: R(0, WORLD_H), h: R(5, 14), s: R(0.6, 1.3) });
+      this.tufts.push({ x: R(0, worldW), y: GROUND, h: R(5, 14), s: R(0.6, 1.3) });
     }
   }
 
   /** Solid decor (gravestones, wrecks, barriers, rubble, tree trunks) blocks
-   * the player — pushes them back out along the shortest escape direction
+   * the player along the ground line — pushes them back the shortest way out
    * instead of letting them walk straight through. Purely cosmetic decor
    * (the lamp post's thin pole) is excluded via a 0 radius in DECOR_SOLID_R. */
   private resolvePlayerObstacles() {
@@ -679,17 +649,15 @@ export class Engine {
     for (const d of this.decor) {
       const solidR = DECOR_SOLID_R[d.kind];
       if (solidR <= 0) continue;
-      const dx = p.x - d.x, dy = p.y - d.y;
-      const dist = Math.hypot(dx, dy) || 1;
+      const dx = p.x - d.x;
+      const dist = Math.abs(dx) || 1;
       const min = solidR + playerR;
       if (dist < min) {
         const push = min - dist;
-        p.x += (dx / dist) * push;
-        p.y += (dy / dist) * push;
+        p.x += Math.sign(dx) * push;
       }
     }
     p.x = clamp(p.x, 26, this.worldW - 26);
-    p.y = clamp(p.y, 26, WORLD_H - 26);
   }
 
   /* ---------------- input ---------------- */
@@ -728,10 +696,6 @@ export class Engine {
 
   private onBlur = () => {
     this.keys.clear();
-    this.stick.x = 0;
-    this.stick.y = 0;
-    this.aimStick.x = 0;
-    this.aimStick.y = 0;
     this.mouse.down = false;
   };
 
@@ -740,30 +704,10 @@ export class Engine {
       this.setPaused(true);
   };
 
-  /** Converts a client-space point into the fixed logical canvas coordinate space,
-   * accounting for the canvas being scaled to fit the viewport. Desktop-only — touch
-   * input goes through triggerTap() instead, which no longer needs a live cursor. */
-  private clientToCanvas(clientX: number, clientY: number): { x: number; y: number } {
-    const rect = this.canvas.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return { x: 0, y: 0 };
-    return { x: ((clientX - rect.left) / rect.width) * W, y: ((clientY - rect.top) / rect.height) * H };
-  }
-
-  private onMouseMove = (e: MouseEvent) => {
-    const p = this.clientToCanvas(e.clientX, e.clientY);
-    this.mouse.x = p.x;
-    this.mouse.y = p.y;
-    // a real cursor takes aiming back off a held stick angle — matters on a
-    // touch laptop, where both inputs exist
-    this.pointerAims = true;
-    this.aimHold = null;
-  };
-
   private onMouseDown = (e: MouseEvent) => {
     if (e.button !== 0) return;
     this.sfx.ensure();
     this.mouse.down = true;
-    // Top-down mode: no pivoting, just aim toward mouse
   };
 
   toggleFireMode() {
@@ -791,28 +735,9 @@ export class Engine {
     this.keys.delete(code);
   }
 
-  /** Analog movement from the touch joystick, each component -1..1. Added on
-   * top of the movement keys rather than replacing them, so a touch laptop
-   * can use either. Partial deflection moves slower — see the throttle in
-   * updatePlayer(). Pass (0, 0) on release. */
-  setMoveVector(x: number, y: number) {
-    this.stick.x = clamp(x, -1, 1);
-    this.stick.y = clamp(y, -1, 1);
-  }
-
-  /** Analog aim from the right touch joystick, each component -1..1. While
-   * it's deflected it points the flashlight cone instead of the pointer;
-   * pass (0, 0) on release to hand aiming back to the mouse. */
-  setAimVector(x: number, y: number) {
-    this.aimStick.x = clamp(x, -1, 1);
-    this.aimStick.y = clamp(y, -1, 1);
-    // remember the direction so releasing holds it rather than reverting to
-    // wherever the pointer happens to be; (0,0) is a release, so leave it alone
-    if (x !== 0 || y !== 0) this.aimHold = Math.atan2(y, x);
-  }
-
-  /** Starts/stops continuous fire — same effect as holding/releasing the mouse button.
-   * Only matters in manual-fire mode; auto-fire already engages on laser contact. */
+  /** Starts/stops continuous fire — same effect as holding/releasing the mouse
+   * button (or the on-screen Fire button). Only matters in manual-trigger
+   * mode; auto-fire already engages the instant a target is in the lane. */
   setFiring(down: boolean) {
     if (down) this.sfx.ensure();
     this.mouse.down = down;
@@ -825,19 +750,8 @@ export class Engine {
     this.dash();
   }
 
-  /** Touch's tap-to-act — mirrors onMouseDown's full decision tree (place during prep,
-   * else pivot the lane) from a raw client point instead of a live-tracked cursor. */
-  triggerTap(clientX: number, clientY: number) {
-    if (this.mode !== "play" || this.over || this.paused || this.modalOpen) return;
-    this.sfx.ensure();
-    const p = this.clientToCanvas(clientX, clientY);
-    this.mouse.x = p.x;
-    this.mouse.y = p.y;
-    // Top-down: tap updates aim direction, no pivoting
-  }
-
   /** KeyE (or its touch interact-button equivalent) while a boss is alive forces
-   * the boss to win the laser-ray tie-break over a zombie — see acquireRayTarget(). */
+   * the boss to win the lane lock over a zombie — see acquireLaneTarget(). */
   toggleBossForceTarget() {
     if (!this.boss || this.boss.dead) return;
     this.bossForceTarget = !this.bossForceTarget;
@@ -848,20 +762,17 @@ export class Engine {
     window.addEventListener("keyup", this.onKeyUp);
     window.addEventListener("blur", this.onBlur);
     document.addEventListener("visibilitychange", this.onVis);
-    this.canvas.addEventListener("mousemove", this.onMouseMove);
     this.canvas.addEventListener("mousedown", this.onMouseDown);
     window.addEventListener("mouseup", this.onMouseUp);
     this.canvas.addEventListener("contextmenu", this.onCtx);
   }
 
-  private inputDir() {
-    // Returns direction in 2D for top-down movement. Magnitude can exceed 1
-    // (diagonals, or keys plus stick) — the mover normalizes and throttles.
+  /** -1, 0 or 1: which way the movement keys (or the touch Left/Right buttons,
+   * which press the same virtual keys via pressKey/releaseKey) are held. */
+  private inputDir(): -1 | 0 | 1 {
     const r = this.keys.has("KeyD") || this.keys.has("ArrowRight") ? 1 : 0;
     const l = this.keys.has("KeyA") || this.keys.has("ArrowLeft") ? 1 : 0;
-    const d = this.keys.has("KeyS") || this.keys.has("ArrowDown") ? 1 : 0;
-    const u = this.keys.has("KeyW") || this.keys.has("ArrowUp") ? 1 : 0;
-    return { x: r - l + this.stick.x, y: d - u + this.stick.y };
+    return (r - l) as -1 | 0 | 1;
   }
 
   private dash() {
@@ -871,12 +782,7 @@ export class Engine {
     p.dashCd = this.st.dashMax;
     p.dashT = 0.16 + 0.06 * stDash;
     const mov = this.inputDir();
-    // In top-down, dash in direction of input or facing direction
-    if (mov.x !== 0 || mov.y !== 0) {
-      p.dashDir = Math.atan2(mov.y, mov.x);
-    } else {
-      p.dashDir = p.aim; // dash toward where player is aiming
-    }
+    p.dashDir = mov !== 0 ? mov : this.facing;
     this.sfx.dash();
   }
 
@@ -927,69 +833,49 @@ export class Engine {
     p.cd -= dt; p.ifr -= dt; p.hurtT -= dt; p.flash -= dt; p.dashCd -= dt; p.useT -= dt;
     if (this.stimT > 0) this.stimT -= dt;
 
-    // 2D movement (top-down)
+    // side-view movement: horizontal only — every character stands on GROUND
     const mov = this.inputDir();
     if (p.dashT > 0) {
       p.dashT -= dt;
       const speed = 1350;
-      p.vx = Math.cos(p.dashDir) * speed;
-      p.vy = Math.sin(p.dashDir) * speed;
-      const pdx = Math.cos(p.dashDir) * 10;
-      const pdy = Math.sin(p.dashDir) * 10;
-      this.particles.push({ x: p.x - pdx, y: p.y - pdy, vx: -pdx * R(3, 9), vy: -pdy * R(3, 9), life: 0.3, max: 0.3, size: R(4, 10), color: "#67e8f9", grav: 0, add: true });
+      p.vx = p.dashDir * speed;
+      const pdx = p.dashDir * 10;
+      this.particles.push({ x: p.x - pdx, y: p.y - 30, vx: -pdx * R(3, 9), vy: R(-50, 50), life: 0.3, max: 0.3, size: R(4, 10), color: "#67e8f9", grav: 0, add: true });
     } else {
       // Tactical Stim: temporary speed rush
       const speed = this.st.speed * (this.stimT > 0 ? 1.35 : 1);
-      const mag = Math.hypot(mov.x, mov.y);
-      if (mag > 0) {
-        // dividing by mag normalizes the direction (so diagonals aren't fast);
-        // the clamped magnitude then throttles it, which is what makes a
-        // half-pushed joystick a half-speed walk. Keys always reach 1.
-        const speedMul = (speed * Math.min(1, mag)) / mag;
-        p.vx = lerp(p.vx, mov.x * speedMul, Math.min(1, 14 * dt));
-        p.vy = lerp(p.vy, mov.y * speedMul, Math.min(1, 14 * dt));
-      } else {
-        p.vx = lerp(p.vx, 0, Math.min(1, 14 * dt));
-        p.vy = lerp(p.vy, 0, Math.min(1, 14 * dt));
-      }
+      p.vx = lerp(p.vx, mov * speed, Math.min(1, 14 * dt));
     }
 
-    // Update position (no gravity in top-down)
+    // Update position — y is fixed at GROUND, nothing moves vertically
     p.x = clamp(p.x + p.vx * dt, 26, this.worldW - 26);
-    p.y = clamp(p.y + p.vy * dt, 26, WORLD_H - 26);
     this.resolvePlayerObstacles();
 
-    // Animation: walk cycle based on velocity magnitude
-    const vel = Math.hypot(p.vx, p.vy);
+    // Animation: walk cycle based on speed
+    const vel = Math.abs(p.vx);
     p.walk += dt * (vel > 26 ? 10 + vel * 0.014 : 3);
 
-    // Face direction based on movement or aim
-    if (vel > 26) {
-      p.face = Math.cos(Math.atan2(p.vy, p.vx)) > 0 ? 1 : -1;
+    // ---- DIRECTIONAL LOCK: movement input pivots the lane ----
+    // A brief lockout after flipping (scaled by the weapon's pivotMul) means
+    // a heavy weapon can't instantly snap the other way for free.
+    if (this.pivotT > 0) this.pivotT -= dt;
+    if (mov !== 0 && mov !== this.facing && this.pivotT <= 0) {
+      this.facing = mov;
+      this.pivotT = 0.12 * (this.effWeapon(this.kind).pivotMul ?? 1);
+      this.target = null;
     }
-    // The mouse always points the flashlight/cone — you still have to look
-    // toward a zombie to find it, in both fire modes. Auto-fire then snaps
-    // the laser onto the nearest zombie inside that lit cone and fires by
-    // itself; manual fire keeps the raw mouse direction and only "acquires"
-    // a target if the exact ray crosses one (see acquireRayTarget), firing
-    // only on click.
-    const mouseAim = this.mouseAimAngle();
-    if (this.autoFire) {
-      const target = this.acquireConeTarget(mouseAim, FLASHLIGHT_HALF_ANGLE);
-      const had = this.onTarget;
-      if (target) {
-        const isBoss = target === this.boss;
-        const ty = isBoss ? target.y - 36 * target.scale : target.y;
-        p.aim = Math.atan2(ty - p.y, target.x - p.x);
-      } else {
-        p.aim = mouseAim;
-      }
-      this.target = target;
-      this.onTarget = target !== null;
-      if (this.onTarget && !had) this.laserFlash = 0.25;
+    p.face = this.facing;
+
+    // Aim: flat along the faced lane, or angled up slightly at a locked
+    // target's head — about the only "aiming" a side view needs.
+    this.acquireLaneTarget();
+    if (this.target && !this.target.dead) {
+      const isBoss = this.target === this.boss;
+      const tx = this.target.x;
+      const ty = isBoss ? this.target.y - 36 * this.target.scale : this.target.y - 20;
+      p.aim = Math.atan2(ty - (p.y - CHEST_H), tx - p.x);
     } else {
-      p.aim = mouseAim;
-      this.acquireRayTarget(p.aim);
+      p.aim = this.facing === 1 ? 0 : Math.PI;
     }
     if (this.laserFlash > 0) this.laserFlash -= dt;
 
@@ -1008,9 +894,9 @@ export class Engine {
       }
     } else if (this.ammo[this.kind] <= 0) {
       this.startReload(); // auto reload the instant the mag runs dry
-    } else if (p.cd <= 0 && p.useT <= 0) {
-      // AUTO-FIRE ON: shoot only when a zombie is on the laser line.
-      // AUTO-FIRE OFF: manual trigger via mouse.
+    } else if (p.cd <= 0 && this.pivotT <= 0 && p.useT <= 0) {
+      // AUTO-FIRE ON: shoot only when a zombie is in the faced lane.
+      // AUTO-FIRE OFF: manual trigger via mouse/tap.
       if (wantsFire) this.fire();
     }
     if (this.ambushT > 0) this.ambushT -= dt;
@@ -1081,108 +967,47 @@ export class Engine {
     for (const d of this.decals) d.a -= dt * 0.02;
     this.decals = this.decals.filter((d) => d.a > 0.05);
 
-    // camera — top-down follows player position in 2D
+    // camera — side view: only the horizontal pan follows the player
     {
       const targetX = clamp(p.x - this.viewW / 2, 0, this.worldW - this.viewW);
-      const targetY = clamp(p.y - this.viewH / 2, 0, WORLD_H - this.viewH);
       this.cam = lerp(this.cam, targetX, Math.min(1, 5 * dt));
-      this.camY = lerp(this.camY, targetY, Math.min(1, 5 * dt));
     }
     this.shakeMag = Math.max(0, this.shakeMag - dt * 26);
     this.shakeX = R(-this.shakeMag, this.shakeMag);
     this.shakeY = R(-this.shakeMag, this.shakeMag) * 0.7;
   }
 
-  /* ============ TARGETING: mouse-directed aim ============ */
+  /* ============ TARGETING: directional lock auto-aim ============ */
 
-  /** Pure mouse-directed aim angle. */
-  private mouseAimAngle() {
-    // the right stick, while deflected, aims live
-    if (this.aimStick.x !== 0 || this.aimStick.y !== 0) {
-      return Math.atan2(this.aimStick.y, this.aimStick.x);
-    }
-    // released: hold the direction it left off at. Falling through to the
-    // pointer here is what used to snap the aim back to the last tap.
-    if (this.aimHold !== null) return this.aimHold;
-    if (this.pointerAims) {
-      const p = this.pl;
-      // mouse.x/y are canvas (screen-space) pixels. canvasToWorld undoes the
-      // camera pan and the zoom together — the zoom has to be undone here too,
-      // or the cursor and the laser it aims disagree at anything but 1x.
-      const m = this.canvasToWorld(this.mouse.x, this.mouse.y);
-      return Math.atan2(m.y - p.y, m.x - p.x);
-    }
-    // touch, before the stick has ever been touched — keep facing as-is rather
-    // than letting a stray tap point us somewhere
-    return this.pl.aim;
-  }
-
-  /** Auto-fire mode: nearest zombie within range AND inside the flashlight
-   * cone around `aim` (the raw mouse direction) — the player still has to
-   * look roughly toward a target to find it, but doesn't need to line up
-   * an exact ray once it's in view. The boss can steal the pick via
-   * bossForceTarget, same idea as acquireRayTarget's tie-break. */
-  private acquireConeTarget(aim: number, halfAngle: number): AimTarget | null {
+  /** Nearest zombie in the faced lane, within the weapon's effective range —
+   * plus the boss lock rule: with a boss alive, it wins the lock unless a
+   * regular zombie ("add") is within 130px, or the player forced it with KeyE
+   * (`bossForceTarget`). */
+  private acquireLaneTarget() {
     const p = this.pl;
     const w = this.effWeapon(this.kind);
     const range = w.range * (1 + 0.12 * (this.stacks["velo"] || 0));
-    const angleDiff = (a: number) => {
-      let d = Math.abs(a - aim) % TAU;
-      if (d > Math.PI) d = TAU - d;
-      return d;
-    };
     let best: AimTarget | null = null;
     let bestD = Infinity;
 
     for (const z of this.zombies) {
       if (z.dead) continue;
-      const dx = z.x - p.x, dy = z.y - p.y;
-      const d = Math.hypot(dx, dy);
-      if (d > range || angleDiff(Math.atan2(dy, dx)) > halfAngle) continue;
+      const dx = z.x - p.x;
+      // strictly the lane we're facing
+      if (this.facing === 1 ? dx < -14 : dx > 14) continue;
+      const d = Math.abs(dx);
+      if (d > range) continue;
       if (d < bestD) { bestD = d; best = z; }
     }
 
     const boss = this.boss;
     if (boss && !boss.dead && boss.state !== "emerge") {
-      const dx = boss.x - p.x, dy = boss.y - p.y;
-      const d = Math.hypot(dx, dy);
-      if (d <= range && angleDiff(Math.atan2(dy, dx)) <= halfAngle && (this.bossForceTarget || d < bestD)) {
-        best = boss;
-      }
-    }
-    return best;
-  }
-
-  /** Manual-fire mode: the laser is wherever the mouse points, and a target
-   * is only "acquired" (for the hot-reticle highlight) if that exact ray
-   * actually crosses a zombie or the boss — no auto-snap to the nearest one. */
-  private acquireRayTarget(aim: number) {
-    const p = this.pl;
-    const w = this.effWeapon(this.kind);
-    const range = w.range * (1 + 0.12 * (this.stacks["velo"] || 0));
-    const dirX = Math.cos(aim), dirY = Math.sin(aim);
-    let best: AimTarget | null = null;
-    let bestProj = Infinity;
-
-    for (const z of this.zombies) {
-      if (z.dead) continue;
-      const dx = z.x - p.x, dy = z.y - p.y;
-      const proj = dx * dirX + dy * dirY; // distance along the aim ray
-      if (proj <= 0 || proj > range) continue;
-      const perp = Math.abs(dx * dirY - dy * dirX); // distance off the ray
-      if (perp <= z.r + 10 && proj < bestProj) { bestProj = proj; best = z; }
-    }
-
-    const boss = this.boss;
-    if (boss && !boss.dead && boss.state !== "emerge") {
-      const dx = boss.x - p.x, dy = boss.y - p.y;
-      const proj = dx * dirX + dy * dirY;
-      if (proj > 0 && proj <= range) {
-        const perp = Math.abs(dx * dirY - dy * dirX);
-        // KeyE forces the boss to win over a zombie on the same ray, even
-        // one nearer along it, instead of only stealing the lock when it's
-        // strictly closest.
-        if (perp <= boss.r + 10 && (this.bossForceTarget || proj < bestProj)) { bestProj = proj; best = boss; }
+      const dx = boss.x - p.x;
+      const inLane = this.facing === 1 ? dx >= -14 : dx <= 14;
+      const d = Math.abs(dx);
+      if (inLane && d <= range) {
+        const addIsClose = best !== null && bestD < 130;
+        if (!addIsClose || this.bossForceTarget) best = boss;
       }
     }
 
@@ -1194,22 +1019,19 @@ export class Engine {
 
   /* ============ AMBUSH ============ */
 
-  /** Spawn Runners from random directions — triggered by Screamer's shriek, boss's Screaming
-   * Call, camping in place too long, or a hazard. */
+  /** Spawn Runners behind the player — triggered by Screamer's shriek, boss's
+   * Screaming Call, camping in place too long, or a hazard. */
   private triggerAmbush(count: number) {
     this.ambushT = 6;
+    const behind = -this.facing as 1 | -1;
     for (let i = 0; i < count; i++) {
-      // Omnidirectional ambush spawn
-      const angle = Math.random() * TAU;
-      const dist = 400;
-      const x = clamp(this.pl.x + Math.cos(angle) * dist, 22, this.worldW - 22);
-      const y = clamp(this.pl.y + Math.sin(angle) * dist, 22, WORLD_H - 22);
-      const z = this.mkZombie("runner", x, y, 1 + (this.power - 1) * 0.2, 1.25);
+      const x = clamp(this.pl.x + behind * (400 + R(0, 200)), 22, this.worldW - 22);
+      const z = this.mkZombie("runner", x, GROUND, 1 + (this.power - 1) * 0.2, 1.25);
       z.face = x > this.pl.x ? -1 : 1;
       this.zombies.push(z);
       for (let k = 0; k < 8; k++)
         this.particles.push({
-          x, y, vx: Math.cos(angle) * R(40, 80), vy: Math.sin(angle) * R(40, 80),
+          x, y: GROUND, vx: behind * R(40, 80), vy: R(-60, 0),
           life: R(0.3, 0.6), max: 0.6,
           size: R(2, 5), color: "#7f1d1d", grav: 0, add: false,
         });
@@ -1335,9 +1157,9 @@ export class Engine {
     // Tactical Stim: temporary fire-rate rush
     p.cd = 1 / (st.fireRate * (this.stimT > 0 ? 1.4 : 1));
     p.flash = 0.07;
-    // eject a spent casing
+    // eject a spent casing, at chest height
     this.particles.push({
-      x: p.x - Math.cos(p.aim) * 4, y: p.y,
+      x: p.x - Math.cos(p.aim) * 4, y: p.y - CHEST_H,
       vx: -p.face * R(60, 150), vy: R(-210, -150),
       life: 0.6, max: 0.6, size: 1.8, color: "#fbbf24", grav: 1500, add: false,
     });
@@ -1345,10 +1167,10 @@ export class Engine {
     const base = p.aim;
     const wc = WDEF[this.kind].cls;
     const muzzle = wc === "carbine" ? 58 : wc === "smg" ? 48 : 46;
-    // no more "-40 shoulder height" — bullets spawn from the player's real
-    // top-down position, same origin the laser sight and the drawn gun use
+    // bullets spawn from the gun's real position — chest height, same origin
+    // the laser sight and the drawn gun use
     const mzx = p.x + Math.cos(base) * muzzle;
-    const mzy = p.y + Math.sin(base) * muzzle;
+    const mzy = p.y - CHEST_H + Math.sin(base) * muzzle;
     const spread = st.projSpread;
     const jit = st.jitter;
     for (let i = 0; i < n; i++) {
@@ -1368,10 +1190,9 @@ export class Engine {
     }
     for (let i = 0; i < 5; i++)
       this.particles.push({ x: mzx, y: mzy, vx: Math.cos(base + R(-0.5, 0.5)) * R(120, 420), vy: Math.sin(base + R(-0.5, 0.5)) * R(120, 420), life: R(0.08, 0.16), max: 0.16, size: R(1.5, 3.5), color: chance(0.5) ? "#fde68a" : "#f59e0b", grav: 0, add: true });
-    this.particles.push({ x: p.x - Math.cos(base) * 4, y: p.y, vx: -p.face * R(50, 130), vy: R(-190, -140), life: 0.55, max: 0.55, size: 2, color: "#fbbf24", grav: 1500, add: false });
-    // recoil pushes back along the full 2D aim direction now, not just x
-    p.vx -= Math.cos(base) * (w.recoil * 0.55);
-    p.vy -= Math.sin(base) * (w.recoil * 0.55);
+    this.particles.push({ x: p.x - Math.cos(base) * 4, y: p.y - CHEST_H, vx: -p.face * R(50, 130), vy: R(-190, -140), life: 0.55, max: 0.55, size: 2, color: "#fbbf24", grav: 1500, add: false });
+    // recoil kicks the player back along the lane, opposite the facing
+    p.vx -= this.facing * (w.recoil * 0.55);
     this.shake(w.shake);
     this.sfx.shoot();
   }
@@ -1420,14 +1241,14 @@ export class Engine {
       const dir = dx > 0 ? 1 : -1;
       z.face = dir;
       const dist2d = Math.hypot(dx, dy) || 1;
-      const ux = dx / dist2d, uy = dy / dist2d;
+      const ux = dx / dist2d;
 
       if (z.type === "spitter") {
         {
-          // keep-away kiting in full 2D
-          if (dist2d > 400) { z.vx = ux * z.speed; z.vy = uy * z.speed; }
-          else if (dist2d < 230) { z.vx = -ux * z.speed * 0.6; z.vy = -uy * z.speed * 0.6; }
-          else { z.vx *= 0.85; z.vy *= 0.85; }
+          // keep-away kiting along the lane
+          if (dist2d > 400) z.vx = ux * z.speed;
+          else if (dist2d < 230) z.vx = -ux * z.speed * 0.6;
+          else z.vx *= 0.85;
         }
         z.spit -= dt;
         if (z.spit <= 0 && dist2d < 640) {
@@ -1435,34 +1256,31 @@ export class Engine {
           this.spitAt(z);
         }
       } else {
-        // chase the player in full 2D, same as every other stage
+        // chase the player along the ground line
         z.vx = lerp(z.vx, ux * z.speed, Math.min(1, 6 * dt));
-        z.vy = lerp(z.vy, uy * z.speed, Math.min(1, 6 * dt));
       }
       z.x = clamp(z.x + z.vx * dt, 10, this.worldW - 10);
-      z.y = clamp(z.y + z.vy * dt, 22, WORLD_H - 22);
+      z.y = GROUND;
 
       // contact damage
-      if (Math.abs(dx) < z.r + 15 && Math.abs(p.y - z.y) < 56 && z.atk <= 0) {
+      if (Math.abs(dx) < z.r + 15 && z.atk <= 0) {
         z.atk = z.type === "brute" ? 1.15 : 0.8;
         this.hurtPlayer(z.dmg * R(0.9, 1.1), dir * (z.type === "brute" ? 300 : 150));
       }
     }
-    // separation, in full 2D
+    // separation, along the shared ground line
     const zs = this.zombies;
     for (let i = 0; i < zs.length; i++) {
       for (let j = i + 1; j < zs.length; j++) {
         const a = zs[i], b = zs[j];
         const sdx = b.x - a.x;
-        const sdy = b.y - a.y;
-        const sepDist = Math.hypot(sdx, sdy) || 1;
+        const sepDist = Math.abs(sdx) || 1;
         const min = (a.r + b.r) * 0.72;
         if (sepDist < min) {
           const push = (min - sepDist) * 0.5;
-          const sux = sdx / sepDist, suy = sdy / sepDist;
+          const sux = Math.sign(sdx);
           a.x -= sux * push;
           b.x += sux * push;
-          a.y -= suy * push; b.y += suy * push;
         }
       }
     }
@@ -1506,9 +1324,8 @@ export class Engine {
       const bd = Math.hypot(dx, dy) || 1;
       const sp = bossSpeed(def, b.phase);
       b.vx = lerp(b.vx, (dx / bd) * sp, Math.min(1, 4 * dt));
-      b.vy = lerp(b.vy, (dy / bd) * sp, Math.min(1, 4 * dt));
       b.x = clamp(b.x + b.vx * dt, 10, this.worldW - 10);
-      b.y = clamp(b.y + b.vy * dt, 30, WORLD_H - 30);
+      b.y = GROUND;
       b.timer -= dt;
       if (b.atk > 0) b.atk -= dt;
       else if (bd < b.r + 30) {
@@ -1546,9 +1363,8 @@ export class Engine {
       // deliberately does NOT steer: sidestepping is the counter-play, and a
       // charge that tracks you is just a fast chase with extra steps.
       b.vx = b.chargeX * CHARGE_SPEED;
-      b.vy = b.chargeY * CHARGE_SPEED;
       b.x = clamp(b.x + b.vx * dt, 10, this.worldW - 10);
-      b.y = clamp(b.y + b.vy * dt, 30, WORLD_H - 30);
+      b.y = GROUND;
       b.timer -= dt;
       if (b.atk > 0) b.atk -= dt;
       else if (Math.hypot(dx, dy) < b.r + 34) {
@@ -1690,9 +1506,9 @@ export class Engine {
       b.y += b.vy * dt;
       for (const z of this.zombies) {
         if (z.dead || b.hits.has(z)) continue;
-        // top-down zombie body is centered at z.y directly now — no more
-        // "chest height above feet" offset from the old standing side-view body
-        const cy = z.y;
+        // z.y is the zombie's feet — its hittable mass is centred a body's
+        // worth of height above that
+        const cy = z.y - z.r;
         const rr = z.r + 7;
         const dx = b.x - z.x, dy = b.y - cy;
         if (dx * dx + dy * dy < rr * rr * 1.25) {
@@ -1706,7 +1522,7 @@ export class Engine {
       }
       if (b.life > 0 && this.boss && !this.boss.dead && this.boss.state !== "emerge" && !b.hitBoss) {
         const boss = this.boss;
-        const cy = boss.y;
+        const cy = boss.y - boss.r;
         const rr = boss.r + 7;
         const dx = b.x - boss.x, dy = b.y - cy;
         if (dx * dx + dy * dy < rr * rr * 1.25) {
@@ -1717,9 +1533,7 @@ export class Engine {
         }
       }
     }
-    this.bullets = this.bullets.filter(
-      (b) => b.life > 0 && b.x > -60 && b.x < this.worldW + 60 && b.y > -60 && b.y < WORLD_H + 60
-    );
+    this.bullets = this.bullets.filter((b) => b.life > 0 && b.x > -60 && b.x < this.worldW + 60);
   }
 
   private updateEshots(dt: number) {
@@ -1906,7 +1720,6 @@ export class Engine {
     p.ifr = 0.9;
     p.hurtT = 1;
     p.vx += kx;
-    p.vy = Math.min(p.vy, -130);
     this.shake(7);
     this.sfx.hurt();
     for (let i = 0; i < 8; i++)
@@ -1973,9 +1786,8 @@ export class Engine {
     this.recompute();
     this.pl.hp = this.st.maxHp;
     this.pl.x = clamp(this.worldW * 0.12, 40, this.worldW - 40);
-    this.pl.y = WORLD_H / 2;
+    this.pl.y = GROUND;
     this.cam = clamp(this.pl.x - this.viewW / 2, 0, this.worldW - this.viewW);
-    this.camY = clamp(this.pl.y - this.viewH / 2, 0, WORLD_H - this.viewH);
     this.mode = "play";
     this.beginRest(2.4);
     this.announce(opts.banner, opts.subFor(this.stageDef.name), 2.8);
@@ -2170,11 +1982,10 @@ export class Engine {
   /* ---------------- inventory: crates, backpack, consumables ---------------- */
 
   private spawnCrate(tier: CrateTier) {
-    // scatter near the player on both axes, or it can land somewhere they're
-    // nowhere near and never visibly reach
+    // scatter along the ground near the player, or it can land somewhere
+    // they're nowhere near and never visibly reach
     const x = clamp(this.pl.x + R(-160, 160), 30, this.worldW - 30);
-    const y = clamp(this.pl.y + R(-140, 140), 30, WORLD_H - 30);
-    this.crates.push({ x, y, tier, opened: false });
+    this.crates.push({ x, y: GROUND, tier, opened: false });
   }
 
   private isNearCrate(cr: Crate): boolean {
@@ -2280,23 +2091,20 @@ export class Engine {
 
   private throwGrenade() {
     const p = this.pl;
-    // Top-down: throw in aim direction at fixed range
-    const angle = p.aim;
+    // tossed down the faced lane at a fixed range
     const speed = 260;
-    const vx = Math.cos(angle) * speed;
-    const vy = Math.sin(angle) * speed;
-    this.grenades.push({ x: p.x, y: p.y, vx, vy, fuse: 1.6 });
+    const vx = this.facing * speed;
+    this.grenades.push({ x: p.x, y: p.y, vx, vy: 0, fuse: 1.6 });
     this.sfx.shoot();
   }
 
   private updateGrenades(dt: number) {
     for (const g of this.grenades) {
       g.fuse -= dt;
-      // Top-down: no gravity, grenades move in straight line
       g.x += g.vx * dt;
       g.y += g.vy * dt;
       // Grenades despawn if they go out of bounds
-      if (g.x < 0 || g.x > this.worldW || g.y < 0 || g.y > WORLD_H) {
+      if (g.x < 0 || g.x > this.worldW) {
         g.fuse = -1;
         // detonate shortly after it actually lands, not wherever it happens
         // to be when the original flight fuse runs out — a grenade that's
@@ -2424,13 +2232,10 @@ export class Engine {
     return this.zoomPref;
   }
 
-  /** Size of the visible world window. Zooming in shows *less* world, so every
-   * camera clamp measures against these rather than the canvas W/H. */
+  /** Width of the visible world window. Zooming in shows *less* world, so
+   * every camera clamp measures against this rather than the canvas W. */
   private get viewW() {
     return W / this.zoom;
-  }
-  private get viewH() {
-    return H / this.zoom;
   }
 
   /** Magnification only. Whatever is drawn after this must already be in
@@ -2451,13 +2256,6 @@ export class Engine {
   private camTransform(cam: number, camY: number) {
     this.applyZoom();
     this.ctx.translate(-cam, camY);
-  }
-
-  /** World position of a point given in canvas coordinates — the inverse of
-   * camTransform(), used to turn the cursor into an aim direction. */
-  private canvasToWorld(x: number, y: number) {
-    const z = this.zoom;
-    return { x: this.cam + x / z, y: this.camY + y / z };
   }
 
   /** Starts the rest between waves. */
@@ -2528,11 +2326,10 @@ export class Engine {
     const def = BOSS_DEFS[this.stageDef.bossId ?? "juggernaut"] ?? BOSS_DEFS.juggernaut;
     const hpMul = 1 + (this.power - 1) * 0.22;
     const maxHp = Math.round(150 * hpMul * 4.4 * 1.3 * def.hpMul);
-    // rises just off-screen on one side, at the player's own height rather
-    // than the old fixed GROUND line
+    // rises just off-screen on one side, on the same ground line as everything else
     const side: 1 | -1 = chance(0.5) ? -1 : 1;
     const x = clamp(side < 0 ? this.cam - 200 : this.cam + W + 200, 40, this.worldW - 40);
-    const y = clamp(this.pl.y + R(-160, 160), 60, WORLD_H - 60);
+    const y = GROUND;
     this.boss = {
       defId: def.id,
       x, y, r: def.r, scale: def.scale, dead: false,
@@ -2594,11 +2391,9 @@ export class Engine {
     // walk out of the safe house back onto the left side of the new stage —
     // also what keeps startTravel()'s safeHouseX comfortably in-bounds
     this.pl.x = clamp(this.worldW * 0.12, 40, this.worldW - 40);
-    this.pl.y = WORLD_H / 2;
+    this.pl.y = GROUND;
     this.pl.vx = 0;
-    this.pl.vy = 0;
     this.cam = clamp(this.pl.x - this.viewW / 2, 0, this.worldW - this.viewW);
-    this.camY = clamp(this.pl.y - this.viewH / 2, 0, WORLD_H - this.viewH);
     this.waveInStage = 0;
     this.stageIntermission = false;
     this.modals.delete("stageclear");
@@ -2636,23 +2431,20 @@ export class Engine {
     const speedMul = 1 + Math.min(0.55, (power - 1) * 0.035);
     const dmgMul = 1 + (power - 1) * 0.07;
 
-    // Spawn ring around the player. On the boss stages most of it is biased
-    // into the direction they're actually running: a uniform ring is trivially
-    // outrun at 275 against a 52-speed walker, so sprinting into open space
-    // used to be free forever. The rest stays uniform so it reads as bad luck
-    // rather than a scripted wall, and it only applies while they're moving —
-    // standing still should not conjure enemies in front of you.
+    // Spawns from either edge of the lane, just past the visible window — a
+    // uniform coin flip on which side, biased toward the direction the player
+    // is actually moving on the boss stages so running one way isn't free
+    // forever. Clamped into the world so a spawn near the world's own edge
+    // still lands on solid ground instead of past it.
     const p = this.pl;
-    const moving = Math.hypot(p.vx, p.vy) > 60;
-    const ahead = this.stageDef.bossId != null && moving && chance(0.55);
-    const angle = ahead ? Math.atan2(p.vy, p.vx) + R(-0.7, 0.7) : Math.random() * TAU;
-    const dist = 450 + R(0, 200);
-    let x = this.pl.x + Math.cos(angle) * dist;
-    let y = this.pl.y + Math.sin(angle) * dist;
-
-    // Keep within world bounds
-    x = clamp(x, 22, this.worldW - 22);
-    y = clamp(y, 22, WORLD_H - 22);
+    const movingDir = p.vx > 40 ? 1 : p.vx < -40 ? -1 : 0;
+    const ahead = this.stageDef.bossId != null && movingDir !== 0 && chance(0.65);
+    const side: 1 | -1 = ahead ? (movingDir as 1 | -1) : chance(0.5) ? 1 : -1;
+    const x = clamp(
+      side === 1 ? this.cam + this.viewW + R(20, 160) : this.cam - R(20, 160),
+      22, this.worldW - 22
+    );
+    const y = GROUND;
 
     const z = this.mkZombie(it.type, x, y, hpMul, speedMul);
     z.dmg *= dmgMul;
@@ -2668,12 +2460,11 @@ export class Engine {
     z.face = x > this.pl.x ? -1 : 1;
     this.zombies.push(z);
 
-    // Omnidirectional spawn particles
     for (let i = 0; i < 8; i++)
       this.particles.push({
         x, y,
-        vx: Math.cos(angle) * R(30, 70),
-        vy: Math.sin(angle) * R(30, 70),
+        vx: -side * R(30, 70),
+        vy: R(-40, 40),
         life: R(0.3, 0.6), max: 0.6, size: R(2, 5), color: "#241d18", grav: 0, add: false
       });
   }
@@ -2887,11 +2678,12 @@ export class Engine {
     const t = this.tGlobal;
     const cam = this.cam + this.shakeX;
     // draw code uses the "py = worldY + camY" convention (see drawPlayer/
-    // drawZombie/drawBoss), so this needs to be the negated vertical scroll,
-    // not just the shake jitter — this was the bug keeping the camera from
-    // ever panning vertically, the main reason the game still read as a
-    // side view despite the player being able to move in full 2D
-    const camY = -this.camY + this.shakeY;
+    // drawZombie/drawBoss). A side view never pans vertically, but `camY`
+    // still has to cancel out zoom's scale — applyZoom() scales the whole
+    // canvas about its origin, so without this offset GROUND would render at
+    // GROUND*zoom instead of staying pinned at a fixed screen height (the
+    // same reason `cam` is centered on viewW/2, not W/2).
+    const camY = GROUND / this.zoom - GROUND + this.shakeY;
 
     c.clearRect(0, 0, W, H);
 
@@ -2906,23 +2698,39 @@ export class Engine {
     const px = (this.pl.x - cam) * zf;
     const py = (this.pl.y + camY) * zf;
 
-    /* --- top-down ground (per-stage theme, no sky/horizon) --- */
+    /* --- sky (per-stage theme) --- */
     const theme = this.theme;
-    c.fillStyle = theme.groundDeep;
+    const sky = c.createLinearGradient(0, 0, 0, H);
+    sky.addColorStop(0, theme.skyTop);
+    sky.addColorStop(0.5, theme.skyMid);
+    sky.addColorStop(0.82, theme.skyHorizon);
+    sky.addColorStop(1, theme.skyBottom);
+    c.fillStyle = sky;
     c.fillRect(0, 0, W, H);
+
+    /* --- parallax skyline: two silhouette layers, slower than the world --- */
+    this.drawSkyline(cam, 0.18, theme.groundMid, false);
+    this.drawSkyline(cam, 0.42, theme.groundDeep, true);
+
+    /* --- ground band (gradient) --- */
+    const gg = c.createLinearGradient(0, GROUND, 0, H);
+    gg.addColorStop(0, theme.groundTop);
+    gg.addColorStop(0.15, theme.groundMid);
+    gg.addColorStop(1, theme.groundDeep);
+    c.fillStyle = gg;
+    c.fillRect(0, GROUND, W, H - GROUND);
 
     c.save();
     this.camTransform(cam, camY);
-    // visible world-space bounds, inverse of the translate above
+    // visible world-space x bounds, inverse of the translate above
     const wx0 = cam - 80, wx1 = cam + W + 80;
-    const wy0 = -camY - 80, wy1 = H - camY + 80;
 
-    // tiled floor. Variant per tile comes from hashing its coordinates, so the
-    // layout is a pure function of position — no per-tile state, and identical
-    // across a reload.
+    // tiled floor texture, a couple of tile-rows deep under the ground line.
+    // Variant per tile comes from hashing its coordinates, so the layout is a
+    // pure function of position — no per-tile state, identical across a reload.
     const gt = groundTheme(theme.id);
     const t0x = Math.floor(wx0 / TILE_UNITS), t1x = Math.floor(wx1 / TILE_UNITS);
-    const t0y = Math.floor(wy0 / TILE_UNITS), t1y = Math.floor(wy1 / TILE_UNITS);
+    const t0y = Math.floor((GROUND - 6) / TILE_UNITS), t1y = Math.floor((H + 40) / TILE_UNITS);
     for (let ty = t0y; ty <= t1y; ty++) {
       for (let tx = t0x; tx <= t1x; tx++) {
         c.drawImage(
@@ -2931,110 +2739,74 @@ export class Engine {
         );
       }
     }
-    c.restore();
+    // the top edge of the ground, a bright seam everything stands on
+    c.strokeStyle = "rgba(74,124,82,0.5)";
+    c.lineWidth = 2;
+    c.beginPath();
+    c.moveTo(wx0, GROUND + 0.5);
+    c.lineTo(wx1, GROUND + 0.5);
+    c.stroke();
 
-    // The light pool used to BE the ground — a radial fill from groundTop to
-    // groundMid. With a textured floor underneath it has to darken rather than
-    // paint, so it is the same gradient composited `multiply`: white at the
-    // player leaves the tile untouched, groundDeep at the rim crushes it to
-    // black. Screen-space on purpose, so the lit area doesn't grow with zoom.
-    c.save();
-    c.globalCompositeOperation = "multiply";
-    const pool = c.createRadialGradient(px, py, 40, px, py, H * 0.72);
-    // Neutral greys, not the theme's ground colors: the tiles already carry the
-    // stage's hue, so the falloff only has to change brightness. Multiplying by
-    // a near-black theme color instead crushes the floor to nothing about two
-    // tiles out and throws away the texture this phase exists to add.
-    pool.addColorStop(0, "#ffffff");
-    pool.addColorStop(0.45, "#9299a0");
-    pool.addColorStop(1, "#0b0e12");
-    c.fillStyle = pool;
-    c.fillRect(0, 0, W, H);
-    c.restore();
-
-    c.save();
-    this.camTransform(cam, camY);
-
-    // ground tufts (world-space, no parallax — the ground is directly beneath you)
+    // ground tufts, rooted along the ground line
     c.strokeStyle = "rgba(52,84,56,0.7)";
     c.lineWidth = 1.4;
     for (const tu of this.tufts) {
-      if (tu.x < wx0 || tu.x > wx1 || tu.y < wy0 || tu.y > wy1) continue;
+      if (tu.x < wx0 || tu.x > wx1) continue;
       const sway = Math.sin(t * 1.4 + tu.x) * 1.4;
       c.beginPath();
-      c.moveTo(tu.x, tu.y + 1);
-      c.quadraticCurveTo(tu.x + sway, tu.y - tu.h * 0.6, tu.x - 3 * tu.s + sway, tu.y - tu.h);
-      c.moveTo(tu.x + 4, tu.y + 1);
-      c.quadraticCurveTo(tu.x + 4 + sway, tu.y - tu.h * 0.5, tu.x + 7 * tu.s + sway, tu.y - tu.h * 0.8);
+      c.moveTo(tu.x, GROUND + 1);
+      c.quadraticCurveTo(tu.x + sway, GROUND - tu.h * 0.6, tu.x - 3 * tu.s + sway, GROUND - tu.h);
+      c.moveTo(tu.x + 4, GROUND + 1);
+      c.quadraticCurveTo(tu.x + 4 + sway, GROUND - tu.h * 0.5, tu.x + 7 * tu.s + sway, GROUND - tu.h * 0.8);
       c.stroke();
     }
 
-    // blood decals, flat pools at their actual world position
+    // blood decals, flat pools at the ground line
     for (const d of this.decals) {
-      if (d.x < wx0 || d.x > wx1 || d.y < wy0 || d.y > wy1) continue;
+      if (d.x < wx0 || d.x > wx1) continue;
       c.fillStyle = `rgba(80,14,18,${d.a})`;
       c.beginPath();
-      c.ellipse(d.x, d.y, 14 * d.s, 10 * d.s, 0, 0, TAU);
+      c.ellipse(d.x, GROUND + 4, 18 * d.s, 4.5 * d.s, 0, 0, TAU);
       c.fill();
       c.fillStyle = `rgba(60,10,12,${d.a * 0.8})`;
       c.beginPath();
-      c.ellipse(d.x + 9 * d.s, d.y + 6 * d.s, 6 * d.s, 4 * d.s, 0, 0, TAU);
+      c.ellipse(d.x + 12 * d.s, GROUND + 7, 8 * d.s, 2.5 * d.s, 0, 0, TAU);
       c.fill();
     }
 
-    // the boss's grave — a lasting scar, drawn flat like the blood decals
-    // above rather than through the decor/collision system (see spawnBoss())
+    // the boss's grave — a lasting scar at the ground line, drawn flat like
+    // the blood decals above rather than through the decor/collision system
+    // (see spawnBoss())
     if (this.bossGrave) {
       const g = this.bossGrave;
       c.fillStyle = "rgba(10,8,6,0.75)";
       c.beginPath();
-      c.ellipse(g.x, g.y, 46, 22, 0, 0, TAU);
+      c.ellipse(g.x, GROUND + 3, 46, 9, 0, 0, TAU);
       c.fill();
       c.strokeStyle = "rgba(60,50,40,0.5)";
       c.lineWidth = 2;
       for (let i = 0; i < 5; i++) {
         const ang = (i / 5) * TAU + g.x * 0.01;
         c.beginPath();
-        c.moveTo(g.x + Math.cos(ang) * 20, g.y + Math.sin(ang) * 10);
-        c.lineTo(g.x + Math.cos(ang) * 54, g.y + Math.sin(ang) * 26);
+        c.moveTo(g.x + Math.cos(ang) * 20, GROUND + Math.sin(ang) * 4);
+        c.lineTo(g.x + Math.cos(ang) * 54, GROUND + Math.sin(ang) * 10);
         c.stroke();
       }
     }
 
-    // decor, scattered across the full 2D play area as top-down footprints
+    // decor, standing on the ground line
     for (const d of this.decor) {
-      if (d.x < wx0 || d.x > wx1 || d.y < wy0 || d.y > wy1) continue;
+      if (d.x < wx0 || d.x > wx1) continue;
       this.drawDecor(d, t);
     }
     c.restore();
 
-    /* --- vignette (darkness beyond the player's light) --- */
-    const vg = c.createRadialGradient(px, py, H * 0.3, px, py, H * 0.74);
+    /* --- vignette (darkness at the screen edges) --- */
+    const vg = c.createRadialGradient(px, py, H * 0.35, px, py, H * 0.9);
     vg.addColorStop(0, "rgba(0,0,0,0)");
-    vg.addColorStop(1, "rgba(0,0,0,0.55)");
+    vg.addColorStop(1, "rgba(0,0,0,0.45)");
     c.fillStyle = vg;
     c.fillRect(0, 0, W, H);
-
-    // flashlight-style vision cone, anchored to the player's real screen
-    // position and aimed with them
-    {
-      const aim = this.pl.aim;
-      const coneR = Math.hypot(W, H) * 1.5;
-      const darkenOutside = (half: number, alpha: number) => {
-        c.save();
-        c.beginPath();
-        c.rect(0, 0, W, H);
-        c.moveTo(px, py);
-        c.arc(px, py, coneR, aim - half, aim + half);
-        c.closePath();
-        c.clip("evenodd");
-        c.fillStyle = `rgba(0,0,0,${alpha})`;
-        c.fillRect(0, 0, W, H);
-        c.restore();
-      };
-      darkenOutside(0.95, 0.18);
-      darkenOutside(FLASHLIGHT_HALF_ANGLE, 0.22);
-    }
 
     /* --- gems / crates / zombies / player / projectiles --- */
     this.drawEntities(cam, camY, t);
@@ -3195,26 +2967,6 @@ export class Engine {
       (c as unknown as { letterSpacing: string }).letterSpacing = "0px";
     }
 
-    /* --- reticle (manual mode only) --- */
-    if (this.mode === "play" && !this.over && !this.modalOpen && !this.paused && !this.autoFire) {
-      const r = 11 + Math.max(0, this.pl.cd) * 14;
-      c.strokeStyle = "rgba(254,240,138,0.9)";
-      c.lineWidth = 1.6;
-      c.beginPath();
-      c.arc(this.mouse.x, this.mouse.y, r, 0, TAU);
-      c.stroke();
-      c.beginPath();
-      for (const [ox, oy] of [[r + 3, 0], [-r - 3, 0], [0, r + 3], [0, -r - 3]]) {
-        c.moveTo(this.mouse.x + ox * 1.6, this.mouse.y + oy * 1.6);
-        c.lineTo(this.mouse.x + ox * 0.8, this.mouse.y + oy * 0.8);
-      }
-      c.stroke();
-      c.fillStyle = "rgba(254,240,138,0.9)";
-      c.beginPath();
-      c.arc(this.mouse.x, this.mouse.y, 1.6, 0, TAU);
-      c.fill();
-    }
-
     /* --- debug overlay (?debug=1) --- */
     if (this.debug) {
       c.save();
@@ -3255,34 +3007,61 @@ export class Engine {
   }
 
   /**
-   * Top-down footprint for each decor kind — one atlas blit, plus the two
+   * A repeating skyline silhouette, one rectangle "building" per slot along x.
+   * Height/width per slot come from a cheap deterministic hash (sin/cos of the
+   * slot index) rather than stored state, so the skyline never has to be
+   * regenerated or persisted — it's a pure function of world position, same
+   * idea as `tileVariant`. `parallax` < 1 scrolls the layer slower than the
+   * world, which is what sells the depth between a far and a near layer. */
+  private drawSkyline(cam: number, parallax: number, color: string, near: boolean) {
+    const c = this.ctx;
+    const slot = near ? 130 : 190;
+    const camP = cam * parallax;
+    const x0 = Math.floor((camP - 100) / slot) * slot;
+    const x1 = camP + W + 100;
+    c.save();
+    c.translate(-camP, 0);
+    c.fillStyle = color;
+    for (let x = x0; x < x1; x += slot) {
+      const i = Math.round(x / slot);
+      const seed = i * (near ? 12.9898 : 7.233) + (near ? 3.1 : 9.7);
+      const frac = (v: number) => v - Math.floor(v);
+      const h = (near ? 70 : 40) + frac(Math.sin(seed) * 43758.5453) * (near ? 170 : 110);
+      const w = slot * (0.55 + frac(Math.cos(seed * 1.7) * 12345.678) * 0.35);
+      c.fillRect(x, GROUND - h, w, h + 40);
+    }
+    c.restore();
+  }
+
+  /**
+   * One decor prop, standing on the ground line — one atlas blit, plus the two
    * effects that can't be baked into a sprite because they're state-driven:
    * the contact shadow and the lamp's flicker.
-   *
-   * The tree's sway and the barrier's pulsing hazard stripe are gone. Both were
-   * per-prop canvas work every frame, and a swaying canopy read as almost
-   * nothing from directly above — not worth re-animating a bitmap for.
    */
   private drawDecor(d: Decor, t: number) {
     const c = this.ctx;
     const [hw, hh] = this.atlas.propHalf(d.kind);
+    const fullH = hh * 2;
 
     if (d.kind === 3) {
-      // lamp pool, from the pre-baked glow rather than a fresh
-      // createRadialGradient per lamp per frame
+      // lamp glow, near the top of the pole rather than the prop's centre —
+      // from the pre-baked glow rather than a fresh createRadialGradient per
+      // lamp per frame
       const flick = 0.75 + 0.25 * Math.sin(t * 9 + d.ph) * Math.sin(t * 3.7 + d.ph);
       c.save();
       c.globalAlpha = flick;
-      c.drawImage(this.atlas.glow("rgba(251,146,60,0.5)"), d.x - 60, d.y - 60, 120, 120);
+      c.drawImage(this.atlas.glow("rgba(251,146,60,0.5)"), d.x - 46 + hw, d.y - fullH - 14, 92, 92);
       c.restore();
     } else {
+      // contact shadow, flat on the ground under the prop's footprint
       c.fillStyle = "rgba(0,0,0,0.35)";
       c.beginPath();
-      c.ellipse(d.x + 1.5, d.y + 2, hw * 0.9, hh * 0.75, 0, 0, TAU);
+      c.ellipse(d.x, d.y + 2, hw * 0.9, 3.5, 0, 0, TAU);
       c.fill();
     }
 
-    c.drawImage(this.atlas.prop(d.kind, d.v), d.x - hw, d.y - hh, hw * 2, hh * 2);
+    // anchored by its bottom edge — every prop stands on the ground line
+    c.drawImage(this.atlas.prop(d.kind, d.v), d.x - hw, d.y - fullH, hw * 2, fullH);
   }
 
   private static readonly GEM_PALETTE: Record<Gem["kind"], [string, string, string, string]> = {
@@ -3372,9 +3151,8 @@ export class Engine {
   }
 
 
-  /** Zombie, seen from above: the whole body rotates to face its actual
-   * heading (chase velocity, or the player when idle) instead of only
-   * flipping left/right, so it reads correctly approaching from any angle. */
+  /** Zombie, standing on the ground line and facing left or right — a side
+   * view, so only the two facings the pre-rendered art actually bakes. */
   private drawZombie(z: Zombie, cam: number, camY: number, t: number) {
     const c = this.ctx;
     const px = z.x - cam;
@@ -3383,19 +3161,21 @@ export class Engine {
 
     const type = z.type as ZSpriteType;
     const half = this.atlas.zombieHalf(type);
+    const full = half * 2;
+    const top = py - full;
+    const mid = py - half;
 
-    // soft shadow, directly beneath — top-down, so it tracks the zombie's
-    // own position rather than a fixed horizon line
+    // soft contact shadow, flat on the ground under the feet
     c.fillStyle = "rgba(0,0,0,0.45)";
     c.beginPath();
-    c.ellipse(px, py + half * 0.28, half * 0.72, half * 0.38, 0, 0, TAU);
+    c.ellipse(px, py + 1, half * 0.7, half * 0.2, 0, 0, TAU);
     c.fill();
 
-    // Facing: the sprite is pre-rendered per direction, so pick the nearest
-    // baked one rather than rotating the bitmap — ctx.rotate would resample
-    // the art and smear the pixels it exists to keep crisp.
-    const moving = Math.hypot(z.vx, z.vy) > 4;
-    const heading = moving ? Math.atan2(z.vy, z.vx) : z.face >= 0 ? 0 : Math.PI;
+    // Facing: the sprite is pre-rendered for left/right, so pick whichever
+    // matches the chase direction (or the last faced way, if idle) rather
+    // than rotating the bitmap — ctx.rotate would resample the art and smear
+    // the pixels it exists to keep crisp.
+    const heading = Math.abs(z.vx) > 4 ? (z.vx > 0 ? 0 : Math.PI) : z.face >= 0 ? 0 : Math.PI;
     const dir = dirFor(heading, Z_DIRS);
     // shamble phase -> frame index, matching the old `z.t * (2.4 + speed*0.03)`
     const phase = z.dormant ? 0 : z.t * (2.4 + z.speed * 0.03);
@@ -3406,15 +3186,14 @@ export class Engine {
     const variant = z.tint < 0.5 ? 0 : 1;
 
     const spr = this.atlas.zombie(type, variant, dir, frame);
-    const size = half * 2;
-    c.drawImage(spr, px - half, py - half, size, size);
+    c.drawImage(spr, px - half, top, full, full);
 
     // hit flash — re-blit the same sprite forced to white, so the flash takes
     // the sprite's exact silhouette instead of an approximating oval
     if (z.flash > 0) {
       c.save();
       c.globalAlpha = clamp(z.flash * 9, 0, 0.85);
-      c.drawImage(this.atlas.mask(spr), px - half, py - half, size, size);
+      c.drawImage(this.atlas.mask(spr), px - half, top, full, full);
       c.restore();
     }
 
@@ -3428,8 +3207,8 @@ export class Engine {
         c.globalCompositeOperation = "lighter";
         // sized to the head, not the body: a glow the width of a brute reads
         // as the whole zombie lighting up rather than its eyes catching you
-        const hx = px + Math.cos(heading) * half * 0.34;
-        const hy = py + Math.sin(heading) * half * 0.34;
+        const hx = px + Math.cos(heading) * half * 0.3;
+        const hy = top + full * 0.22;
         const er = half * 0.34;
         c.globalAlpha = 0.42;
         c.drawImage(this.atlas.glow("#ef4444"), hx - er, hy - er, er * 2, er * 2);
@@ -3442,18 +3221,18 @@ export class Engine {
       c.save();
       c.globalAlpha = 0.45;
       c.globalCompositeOperation = "source-atop";
-      c.drawImage(spr, px - half, py - half, size, size);
+      c.drawImage(spr, px - half, top, full, full);
       c.restore();
     }
 
     // spitter sac, glowing at the chest
     if (z.type === "spitter") {
       const pulse = 1 + Math.sin(t * 5 + z.wob) * 0.12;
-      const gr = half * 0.8 * pulse;
+      const gr = half * 0.7 * pulse;
       c.save();
       c.globalCompositeOperation = "lighter";
       c.globalAlpha = 0.55;
-      c.drawImage(this.atlas.glow("#bef264"), px - gr, py - gr, gr * 2, gr * 2);
+      c.drawImage(this.atlas.glow("#bef264"), px - gr, mid - gr, gr * 2, gr * 2);
       c.restore();
     }
 
@@ -3462,16 +3241,16 @@ export class Engine {
       c.save();
       c.fillStyle = "rgba(127,29,29,0.5)";
       c.beginPath();
-      c.ellipse(px, py, half * 0.95, half * 0.95, 0, 0, TAU);
+      c.ellipse(px, mid, half * 0.95, half * 0.95, 0, 0, TAU);
       c.fill();
       c.restore();
     }
 
-    // hp bar, clear of the taller sprite
+    // hp bar, clear above the sprite's head
     if (z.hp < z.maxHp) {
       const wBar = half * 1.2;
       const xBar = px - wBar / 2;
-      const yBar = py - half - 6;
+      const yBar = top - 6;
       c.fillStyle = "rgba(0,0,0,0.55)";
       c.fillRect(xBar, yBar, wBar, 3.4);
       c.fillStyle = z.boss ? "#f87171" : "#dc2626";
@@ -3487,7 +3266,7 @@ export class Engine {
       for (let i = 0; i < 3; i++) {
         const ph = (t * 0.6 + i * 0.9) % 2.7;
         c.globalAlpha = clamp(1 - ph / 2.7, 0, 1) * 0.7;
-        c.fillText("z", px + half * 0.5 + i * 3, py - half - 2 - ph * 10);
+        c.fillText("z", px + half * 0.5 + i * 3, top - 2 - ph * 10);
       }
       c.restore();
     }
@@ -3500,7 +3279,7 @@ export class Engine {
       c.strokeStyle = "#ef4444";
       c.lineWidth = 2;
       c.beginPath();
-      c.arc(px, py, half * (0.8 + pct * 0.3), 0, TAU);
+      c.arc(px, mid, half * (0.8 + pct * 0.3), 0, TAU);
       c.stroke();
       c.restore();
     }
@@ -3556,7 +3335,7 @@ export class Engine {
   }
 
   /**
-   * Boss, as seen from directly above. The body is an atlas blit like the
+   * Boss, standing on the ground line. The body is an atlas blit like the
    * player and the zombies; the emerge rise, the windup core glow and the hit
    * flash stay here because they are state, not art.
    */
@@ -3574,22 +3353,24 @@ export class Engine {
 
     c.fillStyle = "rgba(0,0,0,0.5)";
     c.beginPath();
-    c.ellipse(px, py + 6, b.r * 0.95 * visScale, b.r * 0.7 * visScale, 0, 0, TAU);
+    c.ellipse(px, py + 2, b.r * 0.9 * visScale, b.r * 0.24 * visScale, 0, 0, TAU);
     c.fill();
 
     const frame = b.state === "windup" ? 0 : Math.floor(b.t * 3.2) % BOSS_FRAMES;
     const spr = this.atlas.boss(b.defId, def.color, b.r, dirFor(Math.atan2(b.vy, b.vx), BOSS_DIRS), frame);
     const half = (spr.width * PX_SCALE) / 2 * visScale;
+    const full = half * 2;
+    const top = py - full;
     c.save();
     c.globalAlpha = 0.35 + 0.65 * emergeT;
-    c.drawImage(spr, px - half, py - half, half * 2, half * 2);
+    c.drawImage(spr, px - half, top, full, full);
     c.restore();
 
     // hit flash — the pre-baked white silhouette, never a ctx.filter
     if (b.flash > 0) {
       c.save();
       c.globalAlpha = clamp(b.flash * 9, 0, 0.8);
-      c.drawImage(this.atlas.mask(spr), px - half, py - half, half * 2, half * 2);
+      c.drawImage(this.atlas.mask(spr), px - half, top, full, full);
       c.restore();
     }
 
@@ -3599,71 +3380,70 @@ export class Engine {
     if (windupPct > 0) {
       const coreColor = b.attack ? Engine.BOSS_TELL_COLOR[b.attack] : "#ef4444";
       const coreR = (14 + windupPct * 12 + Math.sin(t * (6 + windupPct * 14)) * 2.5) * visScale;
+      const coreY = top + full * 0.4;
       c.save();
       c.globalCompositeOperation = "lighter";
       c.globalAlpha = 0.5 + 0.4 * windupPct;
-      c.drawImage(this.atlas.glow(coreColor), px - coreR, py - coreR, coreR * 2, coreR * 2);
+      c.drawImage(this.atlas.glow(coreColor), px - coreR, coreY - coreR, coreR * 2, coreR * 2);
       c.restore();
     }
   }
 
 
-  /** Player, drawn as seen from directly above: a round body, a head that
-   * peeks toward the aim direction, feet that scissor along the heading
-   * you're actually moving in, and a gun that rotates a full 360° with the
-   * mouse instead of only flipping left/right. */
+  /** Player, standing on the ground line: a body that faces the locked lane,
+   * a gun that tilts with the aim (flat down the lane, or angled up slightly
+   * at a locked target's head), and legs that scissor while running. */
   private drawPlayer(cam: number, camY: number, t: number) {
     const c = this.ctx;
     const p = this.pl;
     const px = p.x - cam;
     const py = p.y + camY;
+    const chestY = py - CHEST_H;
 
-    // soft contact shadow, directly beneath — no side-view foot offset needed
+    // soft contact shadow, flat on the ground under the feet
     c.fillStyle = "rgba(0,0,0,0.45)";
     c.beginPath();
-    c.ellipse(px, py + 6, SOLDIER_HALF * 0.6, SOLDIER_HALF * 0.5, 0, 0, TAU);
+    c.ellipse(px, py + 2, SOLDIER_HALF * 0.55, SOLDIER_HALF * 0.16, 0, 0, TAU);
     c.fill();
 
     c.save();
     if (p.ifr > 0) c.globalAlpha = 0.55 + 0.45 * Math.sin(t * 42);
     if (p.dashT > 0) c.globalAlpha = 0.82;
 
-    // Body points along the movement heading, the weapon along the aim angle —
-    // they are separate sprites precisely so the two can disagree, which is
-    // what makes twin-stick aiming read.
-    const vel = Math.hypot(p.vx, p.vy);
+    // Body faces the locked lane; the gun tilts with the aim angle — the two
+    // usually agree, but the gun alone tips up at a locked target's head.
+    const vel = Math.abs(p.vx);
     const run = vel > 26;
-    const heading = run ? Math.atan2(p.vy, p.vx) : p.aim;
-    const bodyDir = dirFor(heading, DIRS);
+    const bodyDir = dirFor(this.facing === 1 ? 0 : Math.PI, DIRS);
     const frame = run ? Math.floor(p.walk / (Math.PI / 2)) % FRAMES : 0;
 
     const body = this.atlas.soldier(bodyDir, frame);
     const bs = SOLDIER_HALF * 2;
-    c.drawImage(body, px - SOLDIER_HALF, py - SOLDIER_HALF, bs, bs);
+    const bodyTop = py - bs;
+    c.drawImage(body, px - SOLDIER_HALF, bodyTop, bs, bs);
 
     const wcls = WDEF[this.kind].cls;
     const gun = this.atlas.gun(wcls, dirFor(p.aim, DIRS));
     const gs = GUN_HALF * 2;
-    c.drawImage(gun, px - GUN_HALF, py - GUN_HALF, gs, gs);
+    c.drawImage(gun, px - GUN_HALF, chestY - GUN_HALF, gs, gs);
 
     // hurt flash takes the sprite's own silhouette
     if (p.hurtT > 0) {
       c.save();
       c.globalAlpha = clamp(p.hurtT * 3, 0, 0.6);
-      c.drawImage(this.atlas.mask(body), px - SOLDIER_HALF, py - SOLDIER_HALF, bs, bs);
+      c.drawImage(this.atlas.mask(body), px - SOLDIER_HALF, bodyTop, bs, bs);
       c.restore();
     }
     c.restore();
 
     // ---- muzzle flash, at the real barrel tip ----
     // muzzleReach is in ART pixels; PX_SCALE converts to canvas units, so this
-    // tracks whatever barrel length the sprite actually draws rather than a
-    // constant left over from the old vector art
+    // tracks whatever barrel length the sprite actually draws
     const reach = muzzleReach(wcls) * PX_SCALE;
     if (p.flash > 0) {
       const fa = clamp(p.flash * 16, 0, 1);
       const mx = px + Math.cos(p.aim) * reach;
-      const my = py + Math.sin(p.aim) * reach;
+      const my = chestY + Math.sin(p.aim) * reach;
       c.save();
       c.globalCompositeOperation = "lighter";
       const fg = c.createRadialGradient(mx, my, 0, mx, my, 24);

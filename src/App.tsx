@@ -233,14 +233,9 @@ export default function App() {
   const togglePause = useCallback(() => engineRef.current?.togglePause(), []);
   const toggleMute = useCallback(() => engineRef.current?.toggleMute(), []);
 
-  const move = useCallback((x: number, y: number) => {
-    engineRef.current?.setMoveVector(x, y);
-  }, []);
-  const aim = useCallback((x: number, y: number) => {
-    engineRef.current?.setAimVector(x, y);
-  }, []);
+  const pressKey = useCallback((code: string) => engineRef.current?.pressKey(code), []);
+  const releaseKey = useCallback((code: string) => engineRef.current?.releaseKey(code), []);
   const triggerDash = useCallback(() => engineRef.current?.triggerDash(), []);
-  const tap = useCallback((x: number, y: number) => engineRef.current?.triggerTap(x, y), []);
   const fireStart = useCallback(() => engineRef.current?.setFiring(true), []);
   const fireEnd = useCallback(() => engineRef.current?.setFiring(false), []);
   const interactStart = useCallback(() => {
@@ -318,10 +313,9 @@ export default function App() {
         )}
         {screen === "game" && touch && !paused && !choices && !over && !stageClear && !showInventory && (
           <TouchControls
-            onMove={move}
-            onAim={aim}
+            onPressKey={pressKey}
+            onReleaseKey={releaseKey}
             onDash={triggerDash}
-            onTap={tap}
             onFireStart={fireStart}
             onFireEnd={fireEnd}
             showInteract={!!hud?.crateNear}

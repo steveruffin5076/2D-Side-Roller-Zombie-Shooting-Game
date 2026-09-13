@@ -94,8 +94,8 @@ function ControlsTab() {
   return (
     <div>
       <Section title="MOVEMENT & AIM">
-        <Row icon={<span className="kbd">W A S D</span>}>Move in any direction — this is a full 2D top-down world, not a lane shooter.</Row>
-        <Row icon={<span className="kbd">MOUSE</span>}>Aim. Your flashlight and laser sight always point wherever the cursor is — you have to actually look toward a zombie to see it.</Row>
+        <Row icon={<span className="kbd">A D</span>}>Run left or right — a side view, so that's the whole world of movement. Whichever way you're facing is the lane your gun covers.</Row>
+        <Row icon={<span className="kbd">MOUSE</span>}>Fire, in manual mode. Aim itself is automatic — you don't point a cursor, you just face a direction and the gun covers that lane.</Row>
         <Row icon={<span className="kbd">SHIFT</span>}>Dash — a short burst of speed with brief invulnerability. Watch the DASH READY indicator bottom-right; it's on a cooldown.</Row>
       </Section>
       <Section title="COMBAT">
@@ -126,13 +126,13 @@ function HudTab() {
       <Section title="TOP-CENTER — STAGE & WAVE">
         <Row icon={<Skull className="h-4 w-4" />}>Current stage, wave number, and how many zombies are left in the wave. A red pip marks a boss wave; watch for a HORDE banner on stages 5 and 10 — a sustained swarm with a tough boss-tier zombie mixed in.</Row>
       </Section>
-      <Section title="AIMING — FLASHLIGHT & LASER">
-        <Row icon={<Flashlight className="h-4 w-4" />}>Your mouse always points a lit cone in front of you — outside it, the world dims. A zombie has to be in that cone (and in weapon range) to be seen or shot.</Row>
+      <Section title="AIMING — THE LANE & LASER">
+        <Row icon={<Flashlight className="h-4 w-4" />}>Whichever way you're facing is your lane. The laser sight shows exactly how far your equipped weapon reaches down it — a zombie has to be in the lane and in range to be seen or shot.</Row>
         <Row icon={<Bot className="h-4 w-4 text-emerald-300" />}>
-          <span className="font-semibold text-emerald-300">AUTO-FIRE</span> — once a zombie enters your lit cone, the laser snaps onto the nearest one and fires by itself. You still have to look toward the danger; you just don't have to land the exact shot.
+          <span className="font-semibold text-emerald-300">AUTO-FIRE</span> — once a zombie enters your lane, the laser locks onto the nearest one and fires by itself. You just have to be facing the danger.
         </Row>
         <Row icon={<Hand className="h-4 w-4 text-amber-300" />}>
-          <span className="font-semibold text-amber-300">MANUAL</span> — the laser goes exactly where your mouse points, no snapping. You click to fire, and only hit what the laser is actually crossing. More control, more responsibility.
+          <span className="font-semibold text-amber-300">MANUAL</span> — you fire down the lane on your own trigger, hitting whatever's in it. More control, more responsibility.
         </Row>
       </Section>
       <Section title="BOTTOM-LEFT — WEAPON">

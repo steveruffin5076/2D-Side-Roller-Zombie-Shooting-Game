@@ -55,7 +55,7 @@ describe("soldier sheet", () => {
   it("differs between facings", () => {
     // if axesFor were ignored, every direction would be byte-identical
     const a = bufs[poseIndex(0, 0, FRAMES)].data;
-    const b = bufs[poseIndex(4, 0, FRAMES)].data;
+    const b = bufs[poseIndex(1, 0, FRAMES)].data;
     expect(Buffer.from(a).equals(Buffer.from(b))).toBe(false);
   });
 });
