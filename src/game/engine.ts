@@ -218,6 +218,11 @@ export class Engine {
   private keys = new Set<string>();
   /** true while the fire button/click is held — manual-trigger mode only */
   private mouse = { down: false };
+  /** last mouse position, in canvas logical units (W x H) — null until the
+   * first real mousemove, so touch-only sessions fall back to flat-lane aim
+   * instead of pointing at a stale (0,0). Manual-fire aim only; auto-fire
+   * stays lane/target-locked regardless of where the mouse sits. */
+  private mouseCanvas: { x: number; y: number } | null = null;
   /** world magnification from Settings, 1 = off */
   private zoomPref = 1;
   /** blocks fire() briefly after a lane flip; scaled by the weapon's pivotMul */
@@ -366,6 +371,7 @@ export class Engine {
     document.removeEventListener("visibilitychange", this.onVis);
     this.canvas.removeEventListener("mousedown", this.onMouseDown);
     window.removeEventListener("mouseup", this.onMouseUp);
+    this.canvas.removeEventListener("mousemove", this.onMouseMove);
     this.canvas.removeEventListener("contextmenu", this.onCtx);
   }
 
@@ -709,6 +715,19 @@ export class Engine {
     this.mouse.down = true;
   };
 
+  /** Tracks the cursor in canvas logical units (the same W x H space every
+   * draw call uses) so manual-fire aim can point at it — converts through
+   * the element's actual on-screen size, since the canvas is CSS-scaled to
+   * fit the game box rather than rendered at 1:1 pixels. */
+  private onMouseMove = (e: MouseEvent) => {
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    this.mouseCanvas = {
+      x: ((e.clientX - rect.left) / rect.width) * W,
+      y: ((e.clientY - rect.top) / rect.height) * H,
+    };
+  };
+
   toggleFireMode() {
     this.autoFire = !this.autoFire;
     this.sfx.click();
@@ -770,6 +789,7 @@ export class Engine {
     document.addEventListener("visibilitychange", this.onVis);
     this.canvas.addEventListener("mousedown", this.onMouseDown);
     window.addEventListener("mouseup", this.onMouseUp);
+    this.canvas.addEventListener("mousemove", this.onMouseMove);
     this.canvas.addEventListener("contextmenu", this.onCtx);
   }
 
@@ -895,17 +915,38 @@ export class Engine {
     }
     p.face = this.facing;
 
-    // Aim: flat along the faced lane, or angled at a locked target's body
-    // centre — about the only "aiming" a side view needs. `target.y` is feet
-    // (every character stands on GROUND), so the centre of mass sits `r`
-    // above that, same height hitZombie()/hitBoss() actually check against.
+    // Aim: auto-fire locks onto a target's body centre (or flat along the
+    // lane with none in range) — `target.y` is feet, every character stands
+    // on GROUND, so the centre of mass sits `r` above that, same height
+    // hitZombie()/hitBoss() actually check against. Manual fire instead
+    // points at the mouse, clamped to the forward arc so you can't shoot
+    // back through your own body — turning around still takes flipping
+    // facing via movement, same as always.
     this.acquireLaneTarget();
-    if (this.target && !this.target.dead) {
-      const tx = this.target.x;
-      const ty = this.target.y - this.target.r;
-      p.aim = Math.atan2(ty - (p.y - CHEST_H), tx - p.x);
+    if (this.autoFire) {
+      if (this.target && !this.target.dead) {
+        const tx = this.target.x;
+        const ty = this.target.y - this.target.r;
+        p.aim = Math.atan2(ty - (p.y - CHEST_H), tx - p.x);
+      } else {
+        p.aim = this.facing === 1 ? 0 : Math.PI;
+      }
     } else {
-      p.aim = this.facing === 1 ? 0 : Math.PI;
+      const base = this.facing === 1 ? 0 : Math.PI;
+      if (this.mouseCanvas) {
+        // same projection render() uses for the player/laser (applyZoom()
+        // only, camera offset applied by hand) — see the camY comment there
+        const camY = GROUND / this.zoom - GROUND;
+        const mx = this.mouseCanvas.x / this.zoom + this.cam;
+        const my = this.mouseCanvas.y / this.zoom - camY;
+        const raw = Math.atan2(my - (p.y - CHEST_H), mx - p.x);
+        let rel = raw - base;
+        while (rel > Math.PI) rel -= TAU;
+        while (rel < -Math.PI) rel += TAU;
+        p.aim = base + clamp(rel, -Math.PI / 2, Math.PI / 2);
+      } else {
+        p.aim = base;
+      }
     }
     if (this.laserFlash > 0) this.laserFlash -= dt;
 
